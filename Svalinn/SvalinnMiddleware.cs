@@ -2,7 +2,7 @@ using Microsoft.AspNetCore.Http;
 
 namespace Svalinn;
 
-public class SvalinnMiddleware(RequestDelegate next)
+public sealed class SvalinnMiddleware(RequestDelegate next)
 {
     private static int currentRequests;
     private const int maxConcurrentRequests = 5;
@@ -16,7 +16,7 @@ public class SvalinnMiddleware(RequestDelegate next)
             if (priority < RequestPriority.High)
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                await context.Response.WriteAsync("Svalinn: request shed due to overload");
+                await context.Response.WriteAsync("Request shed due to overload");
                 return;
             }
         }
