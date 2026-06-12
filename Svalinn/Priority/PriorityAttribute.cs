@@ -1,6 +1,6 @@
 using JetBrains.Annotations;
 
-namespace Svalinn;
+namespace Svalinn.Priority;
 
 [AttributeUsage(AttributeTargets.Method | AttributeTargets.Class)]
 [UsedImplicitly]
