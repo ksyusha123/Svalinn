@@ -1,6 +1,51 @@
 @TestApp_HostAddress = http://localhost:5025
 
-GET {{TestApp_HostAddress}}/weatherforecast/
+GET {{TestApp_HostAddress}}/
 Accept: application/json
 
 ###
+
+GET {{TestApp_HostAddress}}/hospital/benchmark/endpoints
+Accept: application/json
+
+###
+
+POST {{TestApp_HostAddress}}/hospital/emergency/admissions
+Content-Type: application/json
+Accept: application/json
+
+{
+  "patientName": "Ivan Petrov",
+  "severity": 5
+}
+
+###
+
+GET {{TestApp_HostAddress}}/hospital/patients/42/allergies
+Accept: application/json
+
+###
+
+POST {{TestApp_HostAddress}}/hospital/appointments
+Content-Type: application/json
+Accept: application/json
+
+{
+  "patientId": 42,
+  "department": "cardiology"
+}
+
+###
+
+GET {{TestApp_HostAddress}}/hospital/patients/42
+Accept: application/json
+
+###
+
+GET {{TestApp_HostAddress}}/hospital/reports/daily
+Accept: application/json
+
+###
+
+GET {{TestApp_HostAddress}}/metrics
+Accept: text/plain
