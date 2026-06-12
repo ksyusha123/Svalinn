@@ -42,9 +42,9 @@ if (svalinnEnabled)
 }
 
 var benchmark = app.Configuration.GetSection("HospitalBenchmark");
-var defaultDelayMs = benchmark.GetValue("DefaultDelayMs", 25);
-var reportsDelayMs = benchmark.GetValue("ReportsDelayMs", 250);
-var emergencyDelayMs = benchmark.GetValue("EmergencyDelayMs", 40);
+var defaultDelayMs = benchmark.GetValue("DefaultDelayMs", 500);
+var reportsDelayMs = benchmark.GetValue("ReportsDelayMs", 1000);
+var emergencyDelayMs = benchmark.GetValue("EmergencyDelayMs", 400);
 
 var modes = new[]
 {

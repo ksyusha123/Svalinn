@@ -1,0 +1,109 @@
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { Counter } from 'k6/metrics';
+
+const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1:5025').replace(/\/$/, '');
+const thinkSeconds = Number(__ENV.THINK_SECONDS || 0);
+
+export const options = {
+  scenarios: {
+    success_disaster: {
+      executor: 'constant-arrival-rate',
+      rate: Number(__ENV.RATE || 600),
+      timeUnit: '1s',
+      duration: __ENV.DURATION || '60s',
+      preAllocatedVUs: Number(__ENV.PREALLOCATED_VUS || 250),
+      maxVUs: Number(__ENV.MAX_VUS || 1200),
+    },
+  },
+  thresholds: {
+    http_req_duration: ['p(95)<5000'],
+  },
+};
+
+const statuses = new Counter('svalinn_statuses');
+
+const traffic = [
+  {
+    weight: 15,
+    method: 'GET',
+    path: '/hospital/patients/42/allergies',
+    priority: 'Critical',
+    name: 'allergy_lookup',
+  },
+  {
+    weight: 10,
+    method: 'POST',
+    path: '/hospital/emergency/admissions',
+    priority: 'Critical',
+    name: 'emergency_admission',
+    body: { patientName: 'Load Test Patient', severity: 5 },
+  },
+  {
+    weight: 30,
+    method: 'POST',
+    path: '/hospital/appointments',
+    priority: 'High',
+    name: 'appointment_booking',
+    body: { patientId: 42, department: 'cardiology' },
+  },
+  {
+    weight: 25,
+    method: 'GET',
+    path: '/hospital/patients/42',
+    priority: 'Normal',
+    name: 'patient_profile',
+  },
+  {
+    weight: 20,
+    method: 'GET',
+    path: '/hospital/reports/daily',
+    priority: 'Low',
+    name: 'daily_report',
+  },
+];
+
+const totalWeight = traffic.reduce((sum, item) => sum + item.weight, 0);
+
+function pickRequest() {
+  let ticket = Math.random() * totalWeight;
+
+  for (const item of traffic) {
+    ticket -= item.weight;
+    if (ticket <= 0) {
+      return item;
+    }
+  }
+
+  return traffic[traffic.length - 1];
+}
+
+export default function () {
+  const item = pickRequest();
+  const params = {
+    headers: item.body ? { 'Content-Type': 'application/json' } : {},
+    tags: {
+      scenario_type: 'success_disaster',
+      priority: item.priority,
+      endpoint: item.name,
+    },
+  };
+
+  const response = item.method === 'POST'
+    ? http.post(`${baseUrl}${item.path}`, JSON.stringify(item.body), params)
+    : http.get(`${baseUrl}${item.path}`, params);
+
+  statuses.add(1, {
+    status: String(response.status),
+    endpoint: item.name,
+    priority: item.priority,
+  });
+
+  check(response, {
+    'server returned handled status': (r) => r.status === 200 || r.status === 202 || r.status === 503,
+  });
+
+  if (thinkSeconds > 0) {
+    sleep(thinkSeconds);
+  }
+}
