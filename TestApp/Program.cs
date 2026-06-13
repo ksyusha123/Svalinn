@@ -45,6 +45,7 @@ var benchmark = app.Configuration.GetSection("HospitalBenchmark");
 var defaultDelayMs = benchmark.GetValue("DefaultDelayMs", 500);
 var reportsDelayMs = benchmark.GetValue("ReportsDelayMs", 1000);
 var emergencyDelayMs = benchmark.GetValue("EmergencyDelayMs", 400);
+var slo = benchmark.GetSection("Slo");
 
 var modes = new[]
 {
@@ -59,7 +60,8 @@ app.MapGet("/", () => Results.Ok(new
     modes,
     docs = "/scalar/v1",
     openApi = "/openapi/v1.json",
-    benchmarkEndpoints = "/hospital/benchmark/endpoints"
+    benchmarkEndpoints = "/hospital/benchmark/endpoints",
+    benchmarkSlo = "/hospital/benchmark/slo"
 }));
 
 app.MapGet("/hospital/benchmark/endpoints", () => Results.Ok(new[]
@@ -69,6 +71,28 @@ app.MapGet("/hospital/benchmark/endpoints", () => Results.Ok(new[]
     new HospitalEndpoint("POST", "/hospital/appointments", "High", "Operational appointment booking"),
     new HospitalEndpoint("GET", "/hospital/patients/42", "Normal", "Routine patient profile read"),
     new HospitalEndpoint("GET", "/hospital/reports/daily", "Low", "Analytical report suitable for shedding")
+}));
+
+app.MapGet("/hospital/benchmark/slo", () => Results.Ok(new
+{
+    objective = "Protect critical and high-priority hospital operations during overload.",
+    overloadSignal = "inflight_requests >= Svalinn:MaxConcurrentRequests",
+    svalinn = new
+    {
+        enabled = svalinnEnabled,
+        maxConcurrentRequests = app.Configuration.GetValue<int>("Svalinn:MaxConcurrentRequests"),
+        minimumPriorityWhenOverloaded = app.Configuration.GetValue<string>("Svalinn:MinimumPriorityWhenOverloaded"),
+        alwaysAllowCriticalRequests = app.Configuration.GetValue<bool>("Svalinn:AlwaysAllowCriticalRequests")
+    },
+    targets = new
+    {
+        criticalAvailability = slo.GetValue("CriticalAvailability", "99.9%"),
+        highAvailability = slo.GetValue("HighAvailability", "99%"),
+        normalAvailability = slo.GetValue("NormalAvailability", "best effort during overload"),
+        lowAvailability = slo.GetValue("LowAvailability", "may be shed first during overload"),
+        criticalP95LatencyMs = slo.GetValue("CriticalP95LatencyMs", 1200),
+        highP95LatencyMs = slo.GetValue("HighP95LatencyMs", 2500)
+    }
 }));
 
 app.MapPost("/hospital/emergency/admissions", async (EmergencyAdmissionRequest request, CancellationToken cancellationToken) =>

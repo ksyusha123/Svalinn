@@ -9,19 +9,23 @@ export const options = {
   scenarios: {
     success_disaster: {
       executor: 'constant-arrival-rate',
-      rate: Number(__ENV.RATE || 600),
+      rate: Number(__ENV.RATE || 900),
       timeUnit: '1s',
       duration: __ENV.DURATION || '60s',
-      preAllocatedVUs: Number(__ENV.PREALLOCATED_VUS || 250),
-      maxVUs: Number(__ENV.MAX_VUS || 1200),
+      preAllocatedVUs: Number(__ENV.PREALLOCATED_VUS || 500),
+      maxVUs: Number(__ENV.MAX_VUS || 2500),
     },
   },
   thresholds: {
     http_req_duration: ['p(95)<5000'],
+    'http_req_duration{priority:Critical}': ['p(95)<1200'],
   },
 };
 
 const statuses = new Counter('svalinn_statuses');
+const acceptedRequests = new Counter('svalinn_accepted_requests');
+const shedRequests = new Counter('svalinn_shed_requests');
+const criticalRejected = new Counter('svalinn_critical_rejected_requests');
 
 const traffic = [
   {
@@ -98,9 +102,18 @@ export default function () {
     endpoint: item.name,
     priority: item.priority,
   });
+  if (response.status === 503) {
+    shedRequests.add(1, { endpoint: item.name, priority: item.priority });
+    if (item.priority === 'Critical') {
+      criticalRejected.add(1, { endpoint: item.name });
+    }
+  } else {
+    acceptedRequests.add(1, { endpoint: item.name, priority: item.priority });
+  }
 
   check(response, {
     'server returned handled status': (r) => r.status === 200 || r.status === 202 || r.status === 503,
+    'critical requests are not shed': (r) => item.priority !== 'Critical' || r.status !== 503,
   });
 
   if (thinkSeconds > 0) {
