@@ -1,6 +1,6 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import { Counter } from 'k6/metrics';
+import { Counter, Rate, Trend } from 'k6/metrics';
 
 const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1:5025').replace(/\/$/, '');
 const thinkSeconds = Number(__ENV.THINK_SECONDS || 0);
@@ -18,7 +18,11 @@ export const options = {
   },
   thresholds: {
     http_req_duration: ['p(95)<5000'],
-    'http_req_duration{priority:Critical}': ['p(95)<1200'],
+    'slo_availability{priority:Critical}': ['rate>=0.999'],
+    'slo_availability{priority:High}': ['rate>=0.99'],
+    'slo_shed_rate{priority:Critical}': ['rate<0.001'],
+    'slo_accepted_latency_ms{priority:Critical}': ['p(95)<1200'],
+    'slo_accepted_latency_ms{priority:High}': ['p(95)<2500'],
   },
 };
 
@@ -26,6 +30,9 @@ const statuses = new Counter('svalinn_statuses');
 const acceptedRequests = new Counter('svalinn_accepted_requests');
 const shedRequests = new Counter('svalinn_shed_requests');
 const criticalRejected = new Counter('svalinn_critical_rejected_requests');
+const availability = new Rate('slo_availability');
+const shedRate = new Rate('slo_shed_rate');
+const acceptedLatency = new Trend('slo_accepted_latency_ms', true);
 
 const traffic = [
   {
@@ -102,13 +109,23 @@ export default function () {
     endpoint: item.name,
     priority: item.priority,
   });
-  if (response.status === 503) {
+
+  const wasShed = response.status === 503;
+  const wasAccepted = response.status === 200 || response.status === 202;
+
+  availability.add(wasAccepted, { endpoint: item.name, priority: item.priority });
+  shedRate.add(wasShed, { endpoint: item.name, priority: item.priority });
+
+  if (wasShed) {
     shedRequests.add(1, { endpoint: item.name, priority: item.priority });
     if (item.priority === 'Critical') {
       criticalRejected.add(1, { endpoint: item.name });
     }
-  } else {
+  }
+
+  if (wasAccepted) {
     acceptedRequests.add(1, { endpoint: item.name, priority: item.priority });
+    acceptedLatency.add(response.timings.duration, { endpoint: item.name, priority: item.priority });
   }
 
   check(response, {
