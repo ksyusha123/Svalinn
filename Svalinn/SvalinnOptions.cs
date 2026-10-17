@@ -2,6 +2,10 @@ namespace Svalinn;
 
 public sealed class SvalinnOptions
 {
+    public LoadSheddingStrategyKind Strategy { get; set; } = LoadSheddingStrategyKind.Inflight;
+
+    public CpuLoadOptions Cpu { get; set; } = new();
+
     public int MaxConcurrentRequests { get; set; } = 5;
 
     public RequestPriority MinimumPriorityWhenOverloaded { get; set; } = RequestPriority.High;

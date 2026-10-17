@@ -1,0 +1,27 @@
+[project]
+name = "loadtesting"
+version = "0.1.0"
+description = "Add your description here"
+readme = "../README.md"
+authors = [
+    { name = "Kseniia Astakhova", email = "k.astakhova@skbkontur.ru" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "matplotlib>=3.11.2",
+]
+
+[project.scripts]
+loadtesting = "loadtesting:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.1",
+]

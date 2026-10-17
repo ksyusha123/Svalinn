@@ -4,9 +4,11 @@
         <TargetFramework>net10.0</TargetFramework>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
+        <IncludeApiDocs Condition="'$(IncludeApiDocs)' == ''">true</IncludeApiDocs>
+        <DefineConstants Condition="'$(IncludeApiDocs)' == 'true'">$(DefineConstants);API_DOCS</DefineConstants>
     </PropertyGroup>
 
-    <ItemGroup>
+    <ItemGroup Condition="'$(IncludeApiDocs)' == 'true'">
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0"/>
         <PackageReference Include="Scalar.AspNetCore" Version="2.9.0" />
     </ItemGroup>

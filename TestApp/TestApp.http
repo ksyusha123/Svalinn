@@ -5,44 +5,32 @@ Accept: application/json
 
 ###
 
-GET {{TestApp_HostAddress}}/hospital/benchmark/endpoints
+GET {{TestApp_HostAddress}}/benchmark/delay/info
 Accept: application/json
 
 ###
 
-POST {{TestApp_HostAddress}}/hospital/emergency/admissions
-Content-Type: application/json
-Accept: application/json
-
-{
-  "patientName": "Ivan Petrov",
-  "severity": 5
-}
-
-###
-
-GET {{TestApp_HostAddress}}/hospital/patients/42/allergies
+GET {{TestApp_HostAddress}}/benchmark/delay/slo
 Accept: application/json
 
 ###
 
-POST {{TestApp_HostAddress}}/hospital/appointments
-Content-Type: application/json
-Accept: application/json
-
-{
-  "patientId": 42,
-  "department": "cardiology"
-}
-
-###
-
-GET {{TestApp_HostAddress}}/hospital/patients/42
+GET {{TestApp_HostAddress}}/benchmark/delay/critical
 Accept: application/json
 
 ###
 
-GET {{TestApp_HostAddress}}/hospital/reports/daily
+GET {{TestApp_HostAddress}}/benchmark/delay/high
+Accept: application/json
+
+###
+
+GET {{TestApp_HostAddress}}/benchmark/delay/normal
+Accept: application/json
+
+###
+
+GET {{TestApp_HostAddress}}/benchmark/delay/low
 Accept: application/json
 
 ###

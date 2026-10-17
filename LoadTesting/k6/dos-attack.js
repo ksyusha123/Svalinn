@@ -77,9 +77,9 @@ function recordResult(response, endpoint, priority, acceptedStatuses) {
 }
 
 export function lowPriorityAttack() {
-  const endpoint = 'daily_report';
+  const endpoint = 'delay_low';
   const priority = 'Low';
-  const response = http.get(`${baseUrl}/hospital/reports/daily`, {
+  const response = http.get(`${baseUrl}/benchmark/delay/low`, {
     tags: {
       scenario_type: 'dos_attack',
       traffic_role: 'attack',
@@ -96,9 +96,9 @@ export function lowPriorityAttack() {
 }
 
 export function criticalProbe() {
-  const endpoint = 'allergy_lookup';
+  const endpoint = 'delay_critical';
   const priority = 'Critical';
-  const response = http.get(`${baseUrl}/hospital/patients/42/allergies`, {
+  const response = http.get(`${baseUrl}/benchmark/delay/critical`, {
     tags: {
       scenario_type: 'dos_attack',
       traffic_role: 'slo_probe',
@@ -115,13 +115,11 @@ export function criticalProbe() {
 }
 
 export function highPriorityProbe() {
-  const endpoint = 'appointment_booking';
+  const endpoint = 'delay_high';
   const priority = 'High';
-  const response = http.post(
-    `${baseUrl}/hospital/appointments`,
-    JSON.stringify({ patientId: 42, department: 'cardiology' }),
+  const response = http.get(
+    `${baseUrl}/benchmark/delay/high`,
     {
-      headers: { 'Content-Type': 'application/json' },
       tags: {
         scenario_type: 'dos_attack',
         traffic_role: 'slo_probe',

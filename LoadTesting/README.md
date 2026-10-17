@@ -1,125 +1,455 @@
-# Svalinn Hospital Load Testing
+# Нагрузочное тестирование Svalinn  
 
-k6 load tests for the hospital benchmark API.
+[Устройство TestApp и маршруты](../TestApp/README.md) ·
+[Исторические результаты](RESULTS.md)
 
-Default target:
+Все команды выполняются из корня репозитория в PowerShell.
 
-```powershell
-http://127.0.0.1:5025
-```
+Проверки приложения находятся в `checks/`, сценарии k6 и их общая модель — в `k6/`.
+Скрипт графиков и uv-проект находятся в `plotting/`, виртуальное окружение — в `plotting/.venv/`.
+PowerShell-скрипты по умолчанию используют Python этого окружения; активировать его не нужно.
 
-## Run the App
+## Требования
 
-With Svalinn enabled:
+- Windows для автоматических ресурсных экспериментов с привязкой процессов к CPU.
+- .NET SDK 10 и доступ к зависимостям NuGet.
+- k6 в `PATH`.
+- uv и Python 3.14+ для анализа и подтверждающей матрицы. Зависимости закреплены в `plotting/uv.lock`. 
 
-```powershell
-$env:Svalinn__Enabled="true"
-dotnet run --project TestApp --urls http://127.0.0.1:5025
-```
+### Проверка работы тестового приложения  
 
-Without Svalinn:
-
-```powershell
-$env:Svalinn__Enabled="false"
-dotnet run --project TestApp --urls http://127.0.0.1:5025
-```
-
-Run each load test once with Svalinn disabled and once with Svalinn enabled, then compare:
-
-- total requests
-- successful responses
-- rejected responses, especially `503`
-- custom k6 counters: `svalinn_accepted_requests` and `svalinn_shed_requests`
-- SLO availability by priority: `slo_availability{priority:*}`
-- shed rate by priority: `slo_shed_rate{priority:*}`
-- accepted-request latency by priority: `slo_accepted_latency_ms{priority:*}`
-- `/metrics` counters when Svalinn is enabled
-
-The default configuration is intentionally tuned to make load shedding visible:
-
-- `Svalinn:MaxConcurrentRequests = 4`
-- low-priority reports take `3000 ms`
-- normal requests take `800 ms`
-- appointment requests take about `1600 ms`
-- k6 uses constant arrival rate instead of a fixed number of users
-
-## DoS-Style Flood
-
-This scenario now has two kinds of traffic:
-
-- attack traffic floods the low-priority expensive report endpoint;
-- SLO probe traffic continuously calls critical and high-priority operations.
-
-The goal is not to measure availability of the attack endpoint. The goal is to
-verify whether critical/high operations remain within SLO while low-priority
-traffic is being shed.
-
-The script reports SLO pass/fail directly through k6 thresholds:
-
-- `Critical` availability must be at least `99.9%`
-- `High` availability must be at least `99%`
-- `Critical` shed rate must stay below `0.1%`
-- `High` shed rate must stay below `1%`
-- accepted `Critical` requests must have `p95 < 1200 ms`
-- accepted `High` requests must have `p95 < 2500 ms`
-- low-priority shed rate should be greater than `5%`, otherwise the scenario did not create visible shedding
+Для проверки работы приложения запустить следующие скрипты:  
 
 ```powershell
-k6 run LoadTesting/dos-attack.js
-```
+dotnet build TestApp/TestApp.csproj -c Release -p:IncludeApiDocs=false
+uv sync --project LoadTesting/plotting --locked --no-install-project
 
-Override defaults:
+./LoadTesting/checks/check-delay-benchmark.ps1
+./LoadTesting/checks/check-cpu-benchmark.ps1
+./LoadTesting/checks/check-io-benchmark.ps1
+```  
+Каждый скрипт запускает уже собранный TestApp, отправляет запросы, проверяет результат и останавливает приложение.
+
+**check-delay-benchmark.ps1** проверяет:
+- Метаданные: задержки 800/1600/800/3000 мс, приоритеты Critical/High/Normal/Low, заданный SLO — 1200 мс.
+- С выключенным Svalinn все четыре эндпоинта отвечают 200.
+- При принудительной перегрузке Critical и High отвечают 200, Normal и Low — 503 с заголовком Retry-After.
+- Успешный ответ содержит resource: "delay".  
+Фактическую длительность задержек и достижение SLO он не проверяет.  
+
+**check-cpu-benchmark.ps1** проверяет:  
+- При выключенном CPU-бенчмарке его эндпоинты возвращают 404.
+- При включённом бенчмарке и выключенном Svalinn все возвращают 200.
+- При принудительной перегрузке Critical и High проходят, Normal и Low получают 503 с Retry-After.
+- Успешные запросы разных приоритетов возвращают одинаковую контрольную сумму вычислений. Это нужно для фиксирования поведения всех эндпоинтов.
+Загрузку процесса, сглаживание и пороги CPU этот скрипт не проверяет.  
+
+**check-io-benchmark.ps1** проверяет:  
+- Такое же разделение приоритетов при перегрузке.
+- При одном доступном I/O-слоте параллельные запросы образуют очередь.
+- Счетчик активных запросов равен 0 или 1, счетчик запросов в очереди не меньше нуля.
+- Четыре успешно обработанных запроса увеличивают completed на четыре.
+- Отмена ожидающего запроса убирает его из очереди, не затрагивая выполняющийся.
+- Отмена выполняющегося запроса освобождает слот.
+- Отменённые запросы не увеличивают completed.
+- После отмен следующий запрос успешно выполняется и содержит заголовок X-Benchmark-Io-Wait-Ms.
+Перегрузка здесь создаётся искусственно: MaxConcurrentRequests=0. Сейчас скрипты опираются на Inflight из настроек приложения.сс
+Для сравнения стратегий под нагрузкой, измерения p95, пропускной способности и доли отказов нужен run-experiment.ps1. 
+
+**Запускать** все **check-\*** перед каждым экспериментом **необязательно** — они полезны после изменений соответствующих эндпоинтов или middleware.
+
+## Запуск  
+
+Нагрузочные тесты запускаются скриптом run-experiment.ps1 с флагами.
+
+### Основные параметры
+
+| Параметр | Что задаёт | По умолчанию |
+| --- | --- | --- |
+| `-Scenario` | Состав потока: `LowFlood` или `SuccessDisaster` | `LowFlood` |
+| `-Workload` | Работа эндпоинтов: `Cpu`, `Io`, `Mixed`, `Delay` | `Cpu` |
+| `-Strategy` | Стратегия защиты: `Inflight` или `Cpu` | `Inflight` |
+| `-DurationSeconds` | Длительность подачи нагрузки одного прогона, 5–600 секунд | `30` |
+| `-Repetitions` | Число повторов каждого уровня в каждом режиме OFF/ON, 1–20 | `3` |
+| `-WarmupRequests` | Число последовательных запросов прогрева перед измерением | `20` |
+| `-OutputDirectory` | Каталог результатов | Новый каталог в `LoadTesting/results` со сценарием, типом работы, стратегией и временем серии |
+
+Один запуск всегда сравнивает выключенный Svalinn и включённую выбранную стратегию.
+Скрипт сам запускает и останавливает TestApp; заранее запускать сервер не нужно.
+
+### Интенсивность нагрузки
+
+Интенсивность задаётся в запросах в секунду (RPS).
+
+| Параметр | Когда используется | По умолчанию |
+| --- | --- | --- |
+| `-Rates` | Только `SuccessDisaster`: уровни общего потока. Доли: Critical 25%, High 30%, Normal 25%, Low 20% | `20,40,60,80,100,120,140,160` |
+| `-CriticalRate` | Только `LowFlood`: постоянный поток Critical | `5` |
+| `-LowRates` | Только `LowFlood`: уровни потока Low | `5,15,25,35,45,55,70,85` |
+
+Например, `-CriticalRate 5 -LowRates 20,40` означает два уровня: 5 Critical + 20 Low,
+затем 5 Critical + 40 Low в секунду. Параметры двух сценариев смешивать нельзя.
+
+### Настройки защиты
+
+| Параметр | Что задаёт | По умолчанию |
+| --- | --- | --- |
+| `-MaxConcurrentRequests` | Порог активных запросов для `Inflight`; также запасной критерий CPU-стратегии при отсутствии свежего измерения | `4` |
+| `-CpuSampleIntervalMs` | Интервал измерения CPU процесса | `250` мс |
+| `-CpuSmoothingFactor` | Вес нового измерения CPU в сглаженном значении: чем больше, тем быстрее реакция | `0.3` |
+| `-CpuOverloadPercent` | Порог входа в перегрузку по сглаженному CPU | `90`% |
+| `-CpuRecoveryPercent` | Порог выхода из перегрузки; должен быть ниже порога входа | `75`% |
+
+`MaxConcurrentRequests` не является жёстким ограничением числа запросов:
+при перегрузке Critical и High продолжают проходить, Normal и Low сбрасываются.
+Параметры `Cpu*` в этой таблице настраивают стратегию `Cpu`, независимо от типа работы `-Workload`.
+
+### Настройки выполняемой работы
+
+| Параметр | Что задаёт | По умолчанию |
+| --- | --- | --- |
+| `-Iterations` | Число итераций вычисления в одном CPU-запросе | `100000` |
+| `-MinWorkerThreads` | Минимальное число рабочих потоков пула .NET; не максимальное | `16` |
+| `-IoSlots` | Число одновременно обслуживаемых I/O-запросов | `4` |
+| `-IoServiceMs` | Время занятия I/O-слота одним запросом | `100` мс |
+| `-CriticalCpuPercent` | Доля CPU-запросов среди Critical в `Mixed` | `50`% |
+| `-HighCpuPercent` | Аналогично для High | `50`% |
+| `-NormalCpuPercent` | Аналогично для Normal | `50`% |
+| `-LowCpuPercent` | Аналогично для Low | `50`% |
+
+В `Mixed` оставшаяся после CPU доля приходится на I/O. Например,
+`-CriticalCpuPercent 30` означает 30% CPU и 70% I/O среди Critical.
+Проценты CPU задаются целыми числами от 0 до 100 и применяются только к `Mixed`.
+
+### Критерии оценки и тайм-аут
+
+| Параметр | Что задаёт | По умолчанию |
+| --- | --- | --- |
+| `-SloMs` | Целевую задержку Critical для оценки результатов | `250` мс; для `Delay` — `1200` мс |
+| `-HighSloMs` | Целевую задержку High | Равна `SloMs`; для `Delay` — `2500` мс |
+| `-TimeoutSeconds` | Сколько k6 ждёт ответ до тайм-аута | `5` секунд |
+
+SLO — критерий оценки: он не заставляет сервер отвечать быстрее и не задаёт порог сброса.
+
+### Запуск процессов и обработка результатов
+
+| Параметр | Назначение | По умолчанию |
+| --- | --- | --- |
+| `-ServerAffinityMask` | Маска привязки сервера к одному логическому CPU | `1` — CPU 0 |
+| `-GeneratorAffinityMask` | Маска привязки генератора k6 | `4` — CPU 2 |
+| `-Port` | Порт запускаемого TestApp | `5026` |
+| `-PythonExecutable` | Команда или путь к Python для анализа | `LoadTesting/plotting/.venv/Scripts/python.exe` |
+| `-Analyze` | После измерений создать CSV и графики | Выключен |
+| `-SkipBuild` | Использовать существующую Release-сборку без пересборки | Выключен |
+| `-Resume` | Продолжить серию из `-OutputDirectory`, пропуская завершённые прогоны | Выключен |
+
+Маски сервера и генератора не должны пересекаться и должны выбирать доступные процессоры.
+Для `-Resume` нужно повторить исходные параметры серии и указать прежний каталог.
+Для новой серии каталог результатов должен быть новым.
+
+### Пример запуска
+
+CPU-нагрузка, CPU-стратегия, три уровня, один повтор по 30 секунд, с графиками:
 
 ```powershell
-$env:BASE_URL="http://127.0.0.1:5025"
-$env:ATTACK_RATE="1200"
-$env:CRITICAL_RATE="30"
-$env:HIGH_RATE="30"
-$env:ATTACK_PREALLOCATED_VUS="500"
-$env:ATTACK_MAX_VUS="2500"
-$env:PROBE_PREALLOCATED_VUS="50"
-$env:PROBE_MAX_VUS="300"
-$env:DURATION="45s"
-k6 run LoadTesting/dos-attack.js
+./LoadTesting/run-experiment.ps1 `
+  -Scenario SuccessDisaster `
+  -Workload Cpu `
+  -Strategy Cpu `
+  -Rates 60,80,100 `
+  -DurationSeconds 30 `
+  -Repetitions 1 `
+  -Analyze `
+  -OutputDirectory LoadTesting/results/cpu-comparison
 ```
 
-## Success Disaster
+Получится 6 прогонов: 3 уровня × 1 повтор × OFF/ON. Это 3 минуты подачи нагрузки
+плюс сборка, калибровка, прогрев и запуск процессов.
 
-This simulates a legitimate traffic spike across critical, high, normal, and low-priority endpoints.
-The script reports SLO pass/fail directly through k6 thresholds:
+Скрипт сам запускает TestApp на порту 5026, выполняет калибровку и прогрев,
+запускает k6, собирает данные и останавливает созданные процессы. Заранее запускать
+сервер не нужно. 
 
-- `Critical` availability must be at least `99.9%`
-- `High` availability must be at least `99%`
-- `Critical` shed rate must stay below `0.1%`
-- accepted `Critical` requests must have `p95 < 1200 ms`
-- accepted `High` requests must have `p95 < 2500 ms`
+## Выбор стратегии
+
+Все PowerShell-runner принимают `-Strategy Inflight` (по умолчанию) или
+`-Strategy Cpu`. Один запуск сравнивает OFF с ON выбранной стратегии.
+Чтобы сравнить стратегии между собой, выполните две серии с одинаковой нагрузкой
+в разных каталогах. Название стратегии сохраняется в manifest, в JSON k6 и
+подписях сравнительных графиков. Настройки CPU также сохраняются и проверяются при Resume.
+
+CPU-стратегия опирается на сглаженную загрузку процесса и гистерезис. При отсутствии
+свежего показания используется порог активных запросов. Сам по себе высокий CPU
+не доказывает нарушение SLO, а низкий CPU не исключает очередь к I/O. Поэтому
+оценивайте задержки и успешность вместе с долей сброса Normal/Low. Пороги 90/75%
+— исходные настройки для сравнения, а не результат оптимизации.
+
+## Выбор сценария и работы
+
+Это независимые параметры: для CPU/I/O/Mixed доступны все шесть сочетаний.
+Delay также поддерживает оба сценария; удобная точка запуска описана ниже.
+
+| `-Scenario` | Состав потока | Параметры интенсивности |
+| --- | --- | --- |
+| `LowFlood` (по умолчанию) | Постоянный Critical и меняющийся Low | `-CriticalRate`, `-LowRates` |
+| `SuccessDisaster` | 25% Critical, 30% High, 25% Normal, 20% Low | `-Rates`: общий RPS |
+
+Не смешивайте `-Rates` с параметрами LowFlood: скрипт отклоняет неподходящие параметры.
+
+| `-Workload` | Работа запроса | Ограниченный ресурс |
+| --- | --- | --- |
+| `Cpu` (по умолчанию) | Фиксированное число итераций PBKDF2-SHA256 | CPU сервера |
+| `Io` | Занятие места семафора и асинхронное обслуживание | Общий I/O-пул |
+| `Mixed` | Отдельный CPU-запрос или отдельный I/O-запрос | CPU и I/O-пул |
+
+В Mixed внутри каждого приоритета по умолчанию 50% CPU и 50% I/O.
+Доли CPU независимо задаются целыми процентами 0–100 через `-CriticalCpuPercent`,
+`-HighCpuPercent`, `-NormalCpuPercent`, `-LowCpuPercent`. В Cpu/Io они не применяются.
+
+Примеры:
 
 ```powershell
-k6 run LoadTesting/success-disaster.js
-```
+# Постоянный Critical 5 RPS и растущий Low.
+./LoadTesting/run-experiment.ps1 -Scenario LowFlood -Workload Cpu `
+  -CriticalRate 5 -LowRates 10,40,60,80 -SkipBuild -Analyze `
+  -OutputDirectory LoadTesting/results/low-flood-cpu
 
-Override defaults:
+# Общий I/O-пул: четыре места по 100 мс.
+./LoadTesting/run-experiment.ps1 -Scenario SuccessDisaster -Workload Io `
+  -Rates 20,40,60,80 -IoSlots 4 -IoServiceMs 100 -SkipBuild -Analyze `
+  -OutputDirectory LoadTesting/results/success-io
+
+# Половина запросов каждого приоритета — CPU, половина — I/O.
+./LoadTesting/run-experiment.ps1 -Scenario SuccessDisaster -Workload Mixed `
+  -Rates 40,80,120,160 -CriticalCpuPercent 50 -HighCpuPercent 50 `
+  -NormalCpuPercent 50 -LowCpuPercent 50 -SkipBuild -Analyze `
+  -OutputDirectory LoadTesting/results/success-mixed
+```
+## Как устроено сравнение
+
+Каждый прогон использует новый процесс сервера и одинаковый прогрев. Порядок
+OFF/ON чередуется между повторами. Перед серией выполняется CPU-калибровка.
+Для каждой непустой пары «приоритет × тип работы» k6 создаёт отдельный
+`constant-arrival-rate`: интенсивность поступления не зависит от скорости ответов.
+Доли задаются рациональными интенсивностями, без случайного выбора CPU/I/O.
+
+В ON стратегии `Inflight` при достижении порога активных запросов Svalinn сбрасывает Normal/Low,
+но продолжает пропускать High/Critical. Порог не ограничивает конкурентность
+жёстко и не различает CPU и I/O. Если защищённый поток сам перегружает ресурс,
+сброс остальных запросов уже не обеспечивает SLO.
+
+Критерии ресурсных сценариев по умолчанию:
+
+- p95 успешных Critical/High ниже 250 мс;
+- не менее 95% всех запросов каждого защищённого приоритета успешны за ≤250 мс;
+- успешность Critical ≥99,9%, High ≥99%;
+- нет пропущенных итераций k6, достигнуты заданная интенсивность и состав потока.
+
+High проверяется в SuccessDisaster; в LowFlood его нет. Нарушение SLO — результат
+эксперимента, серия продолжается. Недостигнутая нагрузка делает прогон невалидным:
+он остаётся в таблицах, но исключается из графиков. Короткий эксперимент не
+подтверждает долгосрочную доступность 99,9%.
+
+## Продолжение и анализ
+
+Для продолжения повторите исходную команду с теми же параметрами, прежним
+`-OutputDirectory` и ключом `-Resume`. Проверяются настройки, версии, бинарный
+файл и сохранённые контрольные суммы исходников модели. После изменения сервера
+нужно начинать новую серию. Завершённые прогоны пропускаются, файлы незавершённых
+попыток сохраняются в отдельных подпапках. Исходный manifest не перезаписывается;
+продолжение получает файлы `resume-*`.
+
+Без `-Analyze` сохраняются измерения, анализ можно выполнить отдельно:
 
 ```powershell
-$env:BASE_URL="http://127.0.0.1:5025"
-$env:RATE="900"
-$env:PREALLOCATED_VUS="500"
-$env:MAX_VUS="2500"
-$env:DURATION="60s"
-$env:THINK_SECONDS="0"
-k6 run LoadTesting/success-disaster.js
+uv run --project LoadTesting/plotting --no-install-project python LoadTesting/plotting/analyze-results.py LoadTesting/results/success-mixed
 ```
 
-The traffic mix is intentionally simple and visible in the script.
-The key expected result with Svalinn enabled is that normal and low-priority
-requests receive `503` during overload, while critical requests continue to pass.
+Если Python установлен под другим именем или по отдельному пути, используйте
+`-PythonExecutable` в PowerShell-скриптах.
 
-In the k6 summary, look at these lines first:
+| Артефакт | Содержание |
+| --- | --- |
+| `manifest.json` | Параметры серии, версии, оборудование, хеш бинарного файла |
+| `source-hashes.json`, `experiment-source.zip` | Контрольные суммы и снимок выбранных исходников эксперимента |
+| `calibration.json` | Результаты CPU-калибровки |
+| Файлы прогонов `.json`, `.run.json`, `.cpu.csv` и логи | Метрики k6, метаданные запуска, CPU и телеметрия |
+| `summary.csv`, `summary-ru.csv` | Итоги по приоритетам каждого прогона |
+| `workload-summary.csv`, `workload-summary-ru.csv` | Разбивка по CPU/I/O внутри приоритетов для нового формата |
+| `critical-p95.png/svg` | Critical p95 в зависимости от нагрузки |
+| `success-disaster-comparison.png/svg` или `low-flood-comparison.png/svg` | Сравнение задержек, SLO и сброса |
+| `critical-by-workload.png`, `cpu-utilization.png` | Разбивка задержек по работе и использование CPU |
+| `io-resource.png` | Занятость пула, очередь, ожидание и завершённые обслуживания для I/O/Mixed |
 
-- `slo_availability`: whether accepted responses satisfy availability targets
-- `slo_shed_rate`: which priorities were shed
-- `slo_accepted_latency_ms`: latency only for requests that were accepted by the app
-- `svalinn_critical_rejected_requests`: should remain `0`
+Оба сценария используют единый формат результатов. Анализатор ожидает manifest
+и сводки текущего runner; набор графиков зависит от типа работы и наличия данных.
 
-If every request still passes on your machine, increase `RATE` first. If k6 reports
-`Insufficient VUs`, increase `PREALLOCATED_VUS` and `MAX_VUS`.
+На графиках показаны медианы показателей повторов, интервалы — минимум и максимум.
+Процентили разных повторов не объединяются. p95 успешных ответов исключает ошибки
+и тайм-ауты: снижение p95 при падении успешности не означает улучшение. В Mixed
+смотрите CPU и I/O отдельно. Долю сброса Normal/Low оценивайте как цену защиты.
+
+`/benchmark/telemetry` опрашивается примерно раз в 500 мс и обходит Svalinn.
+Занятость и очередь — выборочные наблюдения независимо читаемых атомарных счётчиков,
+без отдельной блокировки в обработчике. Максимальная очередь в CSV — максимум
+наблюдаемых отсчётов, а не точный пик. `io_completed` — разница серверного счётчика
+`completed` до/после прогона; это завершения обслуживания, а не гарантированно
+доставленные клиенту ответы. Серверные счётчики отмен удалены, тайм-ауты и успешность
+измеряются k6. CSV и графики используют `completed` для числа завершённых обслуживаний.
+Недоступная итоговая телеметрия не превращается в нули:
+клиентские результаты сохраняются, неизвестные значения обозначаются `nan`.
+Метрики I/O-ресурса общие для всех приоритетов; повторяющиеся значения в CSV
+нельзя суммировать между строками.
+
+`results/` исключён из Git. Для передачи измерений сохраните каталог серии отдельно.
+Архив выбранных исходников полезен для аудита, но не заменяет полный репозиторий.
+
+## Подтверждающая матрица
+
+SuccessDisaster-протокол по умолчанию: по 5 повторов × 30 секунд в OFF и ON.
+Длительность, повторы и уровни задаются до запуска и сохраняются в `matrix.json`.
+
+| Работа | Уровни общего RPS | Число прогонов |
+| --- | --- | --- |
+| CPU | 60, 80, 100, 120, 130 | 50 |
+| I/O | 40, 50, 60, 70, 80 | 50 |
+| Mixed | 100, 120, 140, 160 | 40 |
+
+Всего 140 прогонов: 70 минут подачи нагрузки плюс калибровка,
+прогрев, запуск и завершение процессов. Настройки: 100000 CPU-итераций,
+I/O 4 × 100 мс, Mixed 50/50 внутри каждого приоритета, порог 4,
+SLO 250 мс, тайм-аут 5 секунд, маски CPU 1/4.
+
+```powershell
+# Скрипт матрицы собирает с --no-restore: сначала подготовьте зависимости.
+dotnet restore TestApp/TestApp.csproj -p:IncludeApiDocs=false
+./LoadTesting/run-confirmatory-experiments.ps1 `
+  -OutputDirectory LoadTesting/results/confirmatory-new
+```
+
+Для другой длительности или числа повторов задайте `-DurationSeconds` и
+`-Repetitions`; списки уровней меняются через `-CpuRates`, `-IoRates`, `-MixedRates`.
+Например, `-DurationSeconds 30 -Repetitions 3` даёт 84 прогона и 42 минуты нагрузки
+при тех же уровнях. Для `-Resume` повторите параметры исходной матрицы.
+
+Типы работы идут последовательно. `matrix.json` содержит план, `status.json` —
+состояние, подпапки `cpu`, `io`, `mixed` — измерения и графики, `report.txt` —
+общую сводку. Для продолжения добавьте `-Resume` к той же команде.
+
+Отсутствующий или невалидный прогон делает всю матрицу невалидной. Статус `failed`
+может означать, что данные собраны, но итоговая проверка полноты не пройдена;
+смотрите `error` в статусе и `report.txt`. Нарушение SLO и невалидность нагрузки —
+разные результаты. Максимальный прошедший уровень не является точной границей мощности.
+
+## Delay-серии OFF/ON
+
+Delay использует независимые задержки без общего ограниченного I/O-пула.
+Автоматический запуск работает через общий runner и модель `workload-model.js`:
+новый сервер и прогрев перед каждым прогоном, чередование OFF/ON, отдельный
+поток k6 для каждого приоритета, сохранение исходников и проверка состава нагрузки.
+CPU/I/O-маршруты в этом режиме отключены, CPU-калибровка не выполняется.
+Сервер и генератор закрепляются за разными логическими CPU, как в других сериях.
+
+```powershell
+# 4 уровня × 3 повтора × OFF/ON = 24 прогона по 30 секунд.
+./LoadTesting/run-delay-experiment.ps1 -Rates 5,10,20,40 `
+  -DurationSeconds 30 -Repetitions 3 -SkipBuild -Analyze `
+  -OutputDirectory LoadTesting/results/delay-series
+
+# Постоянный Critical и растущий Low.
+./LoadTesting/run-delay-experiment.ps1 -Scenario LowFlood `
+  -CriticalRate 2 -LowRates 5,10,20,40 -SkipBuild -Analyze `
+  -OutputDirectory LoadTesting/results/delay-low-flood
+```
+
+По умолчанию: `SuccessDisaster`, уровни 5, 10, 20, 40, 60, 80 общего RPS,
+3 повтора по 30 секунд, 5 последовательных запросов прогрева, порт 5026,
+порог 4, тайм-аут 5 секунд. LowFlood по умолчанию использует те же уровни Low
+и постоянный Critical 5 RPS. Скрипт сам запускает и останавливает сервер.
+Без `-SkipBuild` выполняется Release-сборка.
+
+| Параметр | Значение по умолчанию |
+| --- | --- |
+| `CriticalDelayMs` / `HighDelayMs` | 800 / 1600 мс |
+| `NormalDelayMs` / `LowDelayMs` | 800 / 3000 мс |
+| `SloMs` (Critical) / `HighSloMs` (High) | 1200 / 2500 мс |
+| `ServerAffinityMask` / `GeneratorAffinityMask` | 1 / 4 |
+
+Задержки можно менять независимо, например `-CriticalDelayMs 600`. Допустимы
+0–30000 мс. Параметры записываются в manifest; сравнивать серии с разными
+задержками как один эксперимент нельзя. Тайм-аут подбирайте с учётом задержек.
+Все запросы Critical имеют одну заданную задержку; доля Critical в SuccessDisaster — 25%.
+
+`-Analyze` создаёт те же CSV и графики сравнения, что и CPU/I/O-серии, с типом
+работы Delay и отдельным SLO для High. Графика I/O-пула и CPU-калибровки нет.
+Для анализа позже используйте `uv run --project LoadTesting/plotting --no-install-project python LoadTesting/plotting/analyze-results.py <каталог>`.
+`-Resume` работает с исходными параметрами и каталогом; `-PythonExecutable`
+выбирает Python. Общий runner также принимает `-Workload Delay` напрямую.
+Подтверждающая матрица включает только CPU/I/O/Mixed.
+
+При умеренной нагрузке независимые задержки могут сохранять SLO даже без Svalinn.
+Сброс Normal/Low в ON сам по себе не доказывает улучшения: сравнивайте задержки,
+успешность и долю ответов в пределах SLO. Высокая нагрузка может ограничиваться
+CPU, памятью или генератором; у Delay нет заданной мощности общего I/O-пула.
+
+## Ручной DoS-сценарий k6
+
+Для ручной демонстрации используется `k6/dos-attack.js` со своими метриками.
+Для SuccessDisaster с задержками используйте общий runner:
+
+```powershell
+./LoadTesting/run-experiment.ps1 -Scenario SuccessDisaster -Workload Delay `
+  -Rates 5,10,20,40 -Analyze
+```
+
+Автоматическая серия использует общую модель с отдельными потоками и фиксированными интенсивностями.
+Маршруты и их настройки описаны в [TestApp](../TestApp/README.md).
+
+В первом терминале запустите сервер (после Release-сборки):
+
+```powershell
+dotnet run --project TestApp -c Release --no-build --no-launch-profile -- `
+  --urls http://127.0.0.1:5025 --Svalinn:Enabled=true
+```
+
+Во втором терминале запустите DoS-сценарий:
+
+```powershell
+k6 run LoadTesting/k6/dos-attack.js
+```
+
+Повторите с `--Svalinn:Enabled=false`, перезапустив сервер. По умолчанию k6
+обращается к `http://127.0.0.1:5025`; адрес меняется через `BASE_URL`.
+
+| Скрипт | Нагрузка по умолчанию | Переменные окружения |
+| --- | --- | --- |
+| `dos-attack.js` | Low 1200 RPS, Critical 30 RPS, High 30 RPS; 45 секунд | `ATTACK_RATE`, `CRITICAL_RATE`, `HIGH_RATE`, `DURATION`, `ATTACK_PREALLOCATED_VUS`, `ATTACK_MAX_VUS`, `PROBE_PREALLOCATED_VUS`, `PROBE_MAX_VUS` |
+
+Например, разовый запуск с меньшей нагрузкой:
+
+```powershell
+k6 run -e ATTACK_RATE=60 -e DURATION=15s LoadTesting/k6/dos-attack.js
+```
+
+В DoS используются только
+`/benchmark/delay/low`, `/benchmark/delay/critical`, `/benchmark/delay/high`.
+Все рабочие запросы — GET, успешный ответ — 200, сброс — 503.
+
+Цели DoS-сценария: успешность Critical ≥99,9%,
+High ≥99%, p95 принятых Critical <1200 мс, High <2500 мс.
+DoS дополнительно требует сброса Low >5%; отсутствие заметного сброса нарушит этот
+порог даже при успешных Critical/High. При недостатке виртуальных пользователей
+проверьте пропуски и увеличьте соответствующие параметры VU.
+
+Основные метрики: `slo_availability`, `slo_shed_rate`, `slo_accepted_latency_ms`,
+`svalinn_accepted_requests`, `svalinn_shed_requests`, `svalinn_critical_rejected_requests`.
+Цели в k6 заданы в коде; изменение `DelayBenchmark:Slo` на сервере не обновляет их
+автоматически. Общий Python-анализатор не предназначен для сводок ручного DoS-сценария.
+
+## Интерпретация и ограничения
+
+Результаты относятся к конкретному оборудованию, параметрам работы и составу
+потока. Фоновые процессы, частоты CPU и локальный генератор влияют на измерения.
+I/O — синтетическая модель; её теоретические 40 запросов/с при 4 × 100 мс
+не учитывают накладные расходы. Mixed нельзя получить сложением отдельных CPU
+и I/O-результатов: продолжения I/O тоже нуждаются в CPU.
