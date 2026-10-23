@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet('Inflight', 'Cpu')][string]$Strategy = 'Inflight',
     [ValidateRange(50, 60000)][int]$CpuSampleIntervalMs = 250,
     [ValidateRange(0.000001, 1)][double]$CpuSmoothingFactor = 0.3,

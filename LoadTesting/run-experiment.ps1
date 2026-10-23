@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet('Inflight', 'Cpu')][string]$Strategy = 'Inflight',
     [ValidateRange(50, 60000)][int]$CpuSampleIntervalMs = 250,
     [ValidateRange(0.000001, 1)][double]$CpuSmoothingFactor = 0.3,
@@ -105,15 +105,15 @@ if ($Workload -ne 'Mixed') {
 }
 $snapshotPrefix = ''
 if ($Resume) {
-    $previous = Get-Content (Join-Path $output 'manifest.json') -Raw | ConvertFrom-Json -AsHashtable
+    $previous = Get-Content (Join-Path $output 'manifest.json') -Raw | ConvertFrom-Json
     foreach ($key in @('strategy', 'cpuSampleIntervalMs', 'cpuSmoothingFactor', 'cpuOverloadPercent', 'cpuRecoveryPercent', 'cpuProcessorCapacity', 'scenario', 'workload', 'ioSlots', 'ioServiceMs', 'warmupRequests',
         'durationSeconds', 'repetitions', 'iterations', 'minWorkerThreads', 'maxConcurrentRequests',
         'sloMs', 'highSloMs', 'criticalDelayMs', 'highDelayMs', 'normalDelayMs', 'lowDelayMs', 'timeoutSeconds', 'serverAffinityMask', 'generatorAffinityMask', 'binarySha256', 'k6Version', 'dotnetVersion', 'criticalRate')) {
-        if ($settings[$key] -ne $previous[$key]) { throw "Нельзя продолжить: изменён параметр $key." }
+        if ($settings[$key] -ne $previous.$key) { throw "Нельзя продолжить: изменён параметр $key." }
     }
     if (($settings.loadLevels -join ',') -ne ($previous.loadLevels -join ',')) { throw 'Нельзя продолжить: изменены уровни нагрузки.' }
     foreach ($priority in @('critical', 'high', 'normal', 'low')) {
-        if ($settings.cpuPercent[$priority] -ne $previous.cpuPercent[$priority]) { throw "Изменена доля CPU для $priority." }
+        if ($settings.cpuPercent[$priority] -ne $previous.cpuPercent.$priority) { throw "Изменена доля CPU для $priority." }
     }
     foreach ($entry in (Get-Content (Join-Path $output 'source-hashes.json') -Raw | ConvertFrom-Json)) {
         # Исправления записи телеметрии и обработки результатов допустимы; модель нагрузки и сервер должны совпадать.
@@ -134,7 +134,7 @@ $sourceFiles = @('TestApp/Program.cs', 'TestApp/CpuBenchmark.cs', 'TestApp/IoBen
     'LoadTesting/k6/workload-model.js', 'LoadTesting/plotting/analyze-results.py', 'LoadTesting/run-experiment.ps1')
 $sourceFiles += @(Get-ChildItem (Join-Path $root 'Svalinn') -File -Recurse |
     Where-Object { $_.Extension -in @('.cs', '.csproj') -and $_.FullName -notmatch '[\\/](bin|obj)[\\/]' } |
-    ForEach-Object { [IO.Path]::GetRelativePath($root, $_.FullName) })
+    ForEach-Object { $_.FullName.Substring($root.TrimEnd('\', '/').Length + 1).Replace('\', '/') })
 $sourceFiles | ForEach-Object {
     [pscustomobject]@{ Path = $_; Sha256 = (Get-FileHash -LiteralPath (Join-Path $root $_) -Algorithm SHA256).Hash }
 } | ConvertTo-Json | Set-Content (Join-Path $output ($snapshotPrefix + 'source-hashes.json')) -Encoding utf8

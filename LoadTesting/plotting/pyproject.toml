@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "matplotlib>=3.11.2",
+    "psutil>=7.2.2",
 ]
 
 [project.scripts]
@@ -25,3 +26,6 @@ extend-select = ["I"]
 dev = [
     "ruff>=0.17.1",
 ]
+
+[tool.uv]
+package = false
