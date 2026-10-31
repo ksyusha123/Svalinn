@@ -42,6 +42,53 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.parse("--cpu-recovery-percent", "90")
 
+    def test_adaptive_options(self):
+        a = self.parse("--strategy", "Adaptive", "--adaptive-initial-limit", "8", "--adaptive-max-limit", "32")
+        self.assertEqual(runner.adaptive_settings(a)["InitialLimit"], 8)
+        self.assertEqual(runner.adaptive_settings(a)["MaxLimit"], 32)
+        for args in [("--adaptive-min-limit", "10"), ("--adaptive-max-limit", "2"),
+                     ("--adaptive-update-interval-ms", "6000")]:
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                self.parse("--strategy", "Adaptive", *args)
+
+    def test_adaptive_resume_rejects_changed_limit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            previous = {"runner": "python-v1", "strategy": "Adaptive", "adaptive": {"MaxLimit": 32}}
+            write_json(directory / "manifest.json", previous)
+            with self.assertRaisesRegex(ValueError, "adaptive"):
+                runner.check_resume(directory, dict(previous, adaptive={"MaxLimit": 64}))
+
+    def test_cinnamon_options_and_ablation(self):
+        a = self.parse("--strategy", "Cinnamon", "--cinnamon-initial-limit", "8", "--cinnamon-disable-pi")
+        values = runner.cinnamon_settings(a)
+        self.assertEqual(values["InitialLimit"], 8)
+        self.assertFalse(values["EnablePi"])
+        self.assertTrue(values["EnableAutoTuner"])
+        for args in [("--cinnamon-min-limit", "20"), ("--cinnamon-max-limit", "2"),
+                     ("--cinnamon-pi-interval-ms", "3000"), ("--cinnamon-latency-min-samples", "5000"),
+                     ("--cinnamon-reference-reset-interval-ms", "10")]:
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                self.parse("--strategy", "Cinnamon", *args)
+
+    def test_cinnamon_resume_rejects_changed_controller(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            previous = {"runner": "python-v1", "strategy": "Cinnamon", "cinnamon": {"EnablePi": True}}
+            write_json(directory / "manifest.json", previous)
+            with self.assertRaisesRegex(ValueError, "cinnamon"):
+                runner.check_resume(directory, dict(previous, cinnamon={"EnablePi": False}))
+
+    def test_cinnamon_metrics_use_default_group_and_preserve_missing_values(self):
+        text = '# TYPE svalinn_cinnamon_limit gauge\n'
+        text += 'svalinn_cinnamon_limit{group="other"} 99\n'
+        text += 'svalinn_cinnamon_limit{group="default"} 8\n'
+        text += 'svalinn_cinnamon_pi_error{group="default"} -0.25\n'
+        values = runner.parse_cinnamon_metrics(text)
+        self.assertEqual(values["cinnamonLimit"], 8)
+        self.assertEqual(values["cinnamonPiError"], -.25)
+        self.assertIsNone(values["cinnamonQueued"])
+
     def test_resume_requires_directory(self):
         with self.assertRaises(ValueError):
             self.parse("--resume")

@@ -25,6 +25,7 @@ from runner_common import (
     get_json,
     main_guard,
     read_json,
+    request,
     sha256,
     stamp,
     utc,
@@ -57,8 +58,71 @@ def rates(value):
     return result
 
 
+ADAPTIVE_PARAMETERS = {
+    "initial_limit": (int, 1, 100000, 4, "InitialLimit"),
+    "min_limit": (int, 1, 100000, 1, "MinLimit"),
+    "max_limit": (int, 1, 100000, 256, "MaxLimit"),
+    "update_interval_ms": (int, 10, 60000, 500, "UpdateIntervalMs"),
+    "min_samples": (int, 1, 1024, 10, "MinSamples"),
+    "probe_interval_ms": (int, 5000, 3600000, 60000, "ProbeIntervalMs"),
+}
+
+
+def adaptive_settings(a):
+    return {spec[4]: getattr(a, "adaptive_" + key) for key, spec in ADAPTIVE_PARAMETERS.items()}
+
+
+CINNAMON_PARAMETERS = {
+    "initial_limit": (int, 1, 100000, 16, "InitialLimit"),
+    "min_limit": (int, 1, 100000, 1, "MinLimit"),
+    "max_limit": (int, 1, 100000, 1024, "MaxLimit"),
+    "queue_capacity": (int, 0, 100000, 1024, "QueueCapacity"),
+    "queue_timeout_ms": (int, 1, 60000, 1000, "QueueTimeoutMs"),
+    "max_groups": (int, 1, 1024, 64, "MaxGroups"),
+    "pi_interval_ms": (int, 10, 60000, 500, "PiIntervalMs"),
+    "integral_window_ms": (int, 10, 600000, 30000, "IntegralWindowMs"),
+    "proportional_gain": (float, 0, 100, 0.1, "ProportionalGain"),
+    "integral_gain": (float, 0, 100, 1.4, "IntegralGain"),
+    "priority_sample_capacity": (int, 4, 100000, 1000, "PrioritySampleCapacity"),
+    "latency_min_interval_ms": (int, 10, 600000, 2000, "LatencyMinIntervalMs"),
+    "latency_max_interval_ms": (int, 10, 600000, 30000, "LatencyMaxIntervalMs"),
+    "latency_min_samples": (int, 1, 65536, 250, "LatencyMinSamples"),
+    "latency_sample_capacity": (int, 1, 65536, 4096, "LatencySampleCapacity"),
+    "latency_percentile": (float, 0.000001, 1, 0.9, "LatencyPercentile"),
+    "smoothing_factor": (float, 0.000001, 1, 0.2, "SmoothingFactor"),
+    "reference_reset_interval_ms": (int, 10, 3600000, 60000, "ReferenceResetIntervalMs"),
+    "covariance_window": (int, 2, 1000, 50, "CovarianceWindow"),
+    "lower_bound_reset_windows": (int, 1, 1000, 3, "LowerBoundResetWindows"),
+    "inflight_headroom_multiplier": (float, 1, 100, 10, "InflightHeadroomMultiplier"),
+}
+
+
+def cinnamon_settings(a):
+    result = {spec[4]: getattr(a, "cinnamon_" + key) for key, spec in CINNAMON_PARAMETERS.items()}
+    result.update(EnablePi=not a.cinnamon_disable_pi, EnableAutoTuner=not a.cinnamon_disable_auto_tuner)
+    return result
+
+
+def validate_cinnamon(a):
+    s = cinnamon_settings(a)
+    if not s["MinLimit"] <= s["InitialLimit"] <= s["MaxLimit"]:
+        raise ValueError("Cinnamon limits must satisfy min <= initial <= max.")
+    if not s["PiIntervalMs"] <= s["LatencyMinIntervalMs"] <= s["LatencyMaxIntervalMs"]:
+        raise ValueError("Cinnamon intervals must satisfy PI <= latency min <= latency max.")
+    if s["IntegralWindowMs"] < s["PiIntervalMs"] or s["ReferenceResetIntervalMs"] < s["LatencyMinIntervalMs"]:
+        raise ValueError("Cinnamon integral/reset windows are too short.")
+    if s["LatencyMinSamples"] > s["LatencySampleCapacity"]:
+        raise ValueError("Cinnamon minimum samples exceed reservoir capacity.")
+
+
 def strategy_options(parser):
-    parser.add_argument("--strategy", choices=["Inflight", "Cpu"], default="Inflight")
+    for key, (kind, low, high, default, _) in CINNAMON_PARAMETERS.items():
+        parser.add_argument("--cinnamon-" + key.replace("_", "-"), type=bounded(kind, low, high), default=default)
+    parser.add_argument("--cinnamon-disable-pi", action="store_true")
+    parser.add_argument("--cinnamon-disable-auto-tuner", action="store_true")
+    for key, (kind, low, high, default, _) in ADAPTIVE_PARAMETERS.items():
+        parser.add_argument("--adaptive-" + key.replace("_", "-"), type=bounded(kind, low, high), default=default)
+    parser.add_argument("--strategy", choices=["Inflight", "Cpu", "Adaptive", "Cinnamon"], default="Inflight")
     parser.add_argument(
         "--cpu-sample-interval-ms", type=bounded(int, 50, 60000), default=250
     )
@@ -111,7 +175,16 @@ def parser():
     return p
 
 
+def validate_adaptive(a):
+    if not a.adaptive_min_limit <= a.adaptive_initial_limit <= a.adaptive_max_limit:
+        raise ValueError("Adaptive limits must satisfy min <= initial <= max.")
+    if a.adaptive_update_interval_ms > 5000:
+        raise ValueError("Adaptive update interval must not exceed the 5000 ms sample age.")
+
+
 def validate(a):
+    validate_adaptive(a)
+    validate_cinnamon(a)
     if a.cpu_recovery_percent >= a.cpu_overload_percent:
         raise ValueError("CpuRecoveryPercent должен быть ниже CpuOverloadPercent.")
     if a.scenario == "SuccessDisaster":
@@ -197,6 +270,10 @@ def settings(a):
         )
     else:
         values.update(criticalRate=a.critical_rate, lowRates=a.low_rates)
+    if a.strategy == "Adaptive":
+        values["adaptive"] = adaptive_settings(a)
+    if a.strategy == "Cinnamon":
+        values["cinnamon"] = cinnamon_settings(a)
     return values
 
 
@@ -315,6 +392,8 @@ def start_server(a, enabled, name):
             for p in PRIORITIES
         }
     )
+    config.update({"Svalinn:Adaptive:" + key: value for key, value in adaptive_settings(a).items()})
+    config.update({"Svalinn:Cinnamon:" + key: value for key, value in cinnamon_settings(a).items()})
     url = f"http://127.0.0.1:{a.port}"
     args = [executable("dotnet"), DLL, "--urls", url] + [
         f"--{k}={str(v).lower() if isinstance(v, bool) else v}"
@@ -414,6 +493,30 @@ def telemetry(a):
     return get_json(f"http://127.0.0.1:{a.port}/benchmark/telemetry", 2)
 
 
+CINNAMON_METRICS = {
+    "limit": "cinnamonLimit", "inflight": "cinnamonInflight", "queued": "cinnamonQueued",
+    "rejection_ratio": "cinnamonRejectionRatio", "pi_error": "cinnamonPiError", "pi_integral": "cinnamonPiIntegral",
+    "reference_latency_ms": "cinnamonReferenceLatencyMs", "sample_latency_ms": "cinnamonSampleLatencyMs",
+    "estimated_queue": "cinnamonEstimatedQueue", "covariance": "cinnamonCovariance",
+    "reference_resets_total": "cinnamonReferenceResets", "queue_entered_total": "cinnamonEntered",
+    "dispatched_total": "cinnamonDispatched", "priority_rejected_total": "cinnamonPriorityRejected",
+    "queue_full_total": "cinnamonQueueFull", "queue_timeout_total": "cinnamonQueueTimeout",
+    "queue_cancelled_total": "cinnamonQueueCancelled", "successful_total": "cinnamonSuccessful",
+    "failed_total": "cinnamonFailed", "queue_wait_ms_sum": "cinnamonQueueWaitMsSum", "queue_wait_ms_count": "cinnamonQueueWaitCount",
+}
+
+
+def parse_cinnamon_metrics(text):
+    result = dict.fromkeys(CINNAMON_METRICS.values())
+    for line in text.splitlines():
+        for name, field in CINNAMON_METRICS.items():
+            prefix = 'svalinn_cinnamon_' + name + '{group="default"} '
+            if line.startswith(prefix):
+                result[field] = float(line[len(prefix):])
+                break
+    return result
+
+
 def run_one(a, current, repetition, load, mode, name, prefix):
     print(f"Выполняется прогон {name}", flush=True)
     output = a.output_directory
@@ -476,6 +579,14 @@ def run_one(a, current, repetition, load, mode, name, prefix):
                         pass
                 if server.process.poll() is not None:
                     raise RuntimeError("Сервер завершился во время нагрузочного теста.")
+                cinnamon = dict.fromkeys(CINNAMON_METRICS.values())
+                if a.strategy == "Cinnamon" and mode == "on":
+                    try:
+                        status, _, body = request(f"http://127.0.0.1:{a.port}/metrics", .5)
+                        if status == 200 and isinstance(body, str):
+                            cinnamon = parse_cinnamon_metrics(body)
+                    except (OSError, ValueError, RuntimeError):
+                        pass
                 now, cpu = time.perf_counter() - started, server.cpu_time()
                 # A short run can exit between polling and reading its process counters.
                 try:
@@ -497,6 +608,8 @@ def run_one(a, current, repetition, load, mode, name, prefix):
                         "ioWaiting": state["waiting"] if state else None,
                     }
                 )
+                if a.strategy == "Cinnamon":
+                    samples[-1].update(cinnamon)
                 last_time, last_cpu, last_generator_cpu = now, cpu, generator_cpu
                 if now > a.duration_seconds + a.timeout_seconds + 60:
                     raise RuntimeError(

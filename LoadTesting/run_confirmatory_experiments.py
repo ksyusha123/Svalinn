@@ -44,12 +44,14 @@ def parser():
 
 
 def run(a):
+    run_experiment.validate_adaptive(a)
+    run_experiment.validate_cinnamon(a)
     if a.cpu_recovery_percent >= a.cpu_overload_percent:
         raise ValueError("CpuRecoveryPercent должен быть ниже CpuOverloadPercent.")
     strategy = {
         k: v
         for k, v in vars(a).items()
-        if k == "strategy" or k.startswith("cpu_") and k != "cpu_rates"
+        if k == "strategy" or k.startswith("cinnamon_") or k.startswith("adaptive_") or k.startswith("cpu_") and k != "cpu_rates"
     }
     matrix = {
         "strategy": a.strategy,
@@ -71,6 +73,12 @@ def run(a):
             for kind in ("Cpu", "Io", "Mixed")
         ],
     }
+    if a.strategy == "Adaptive":
+        matrix["adaptive"] = run_experiment.adaptive_settings(a)
+        matrix["purpose"] = "Оценка адаптивного ограничения конкурентности; параметры выбраны до измерений."
+    if a.strategy == "Cinnamon":
+        matrix["cinnamon"] = run_experiment.cinnamon_settings(a)
+        matrix["purpose"] = "Оценка Cinnamon без когорт; параметры выбраны до измерений."
     if any(min(s["rates"]) <= 0 for s in matrix["series"]):
         raise ValueError("Все уровни матрицы должны быть положительными.")
     output = a.output_directory.resolve()

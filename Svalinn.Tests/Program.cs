@@ -60,13 +60,17 @@ foreach (var kind in Enum.GetValues<LoadSheddingStrategyKind>())
     services.AddSvalinn(o => o.Strategy = kind);
     using var container = services.BuildServiceProvider();
     var selected = container.GetRequiredService<ILoadSheddingStrategy>();
-    Check(kind == LoadSheddingStrategyKind.Cpu ? selected is CpuLoadSheddingStrategy : selected is ThresholdLoadSheddingStrategy, "DI strategy selection");
+    Check(kind switch { LoadSheddingStrategyKind.Cpu => selected is CpuLoadSheddingStrategy, LoadSheddingStrategyKind.Adaptive => selected is AdaptiveLoadSheddingStrategy, LoadSheddingStrategyKind.Cinnamon => selected is CinnamonLoadSheddingStrategy, _ => selected is ThresholdLoadSheddingStrategy }, "DI strategy selection");
 }
 foreach (var invalid in new Action<SvalinnOptions>[] {
     o => o.Cpu.RecoveryThresholdPercent = 95,
     o => o.Cpu.SmoothingFactor = double.NaN,
     o => o.Cpu.ProcessorCapacity = 0,
     o => o.Cpu.SampleIntervalMs = 1,
+    o => o.Adaptive.InitialLimit = 0,
+    o => o.Adaptive.LatencyTolerance = double.NaN,
+    o => o.Cinnamon.QueueTimeoutMs = 0,
+    o => o.Cinnamon.ProportionalGain = double.NaN,
     o => o.Strategy = (LoadSheddingStrategyKind)99 })
 {
     var services = new ServiceCollection();
@@ -102,4 +106,6 @@ await Task.Delay(2100);
 var stale = new SystemState();
 await monitor.CollectAsync(stale, new DefaultHttpContext(), default);
 Check(stale.TryGet("cpu_sample_fresh", out freshValue) && freshValue == 0, "Old sample must become stale");
+await AdaptiveTests.RunAsync();
+await CinnamonTests.RunAsync();
 Console.WriteLine("PASS: CPU normalization, EWMA, hysteresis, priority admission, fallback, DI, validation and sampler lifecycle");

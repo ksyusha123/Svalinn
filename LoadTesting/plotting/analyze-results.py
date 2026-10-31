@@ -105,6 +105,36 @@ def median(valid_rows, load, mode, priority, key):
     return statistics.median(values) if values else math.nan
 
 
+def plot_cinnamon_timeseries(directory, run_names):
+    for run in sorted(run_names):
+        path = directory / (run + ".cpu.csv")
+        with path.open(encoding="utf-8-sig", newline="") as stream:
+            samples = list(csv.DictReader(stream))
+        if not samples or "cinnamonLimit" not in samples[0]:
+            continue
+        seconds = [number(s["elapsedSeconds"]) for s in samples]
+        panels = [
+            ("Конкурентность", [("cinnamonLimit", "Лимит"), ("cinnamonInflight", "Выполняются")], 1),
+            ("Ожидают в очереди Cinnamon", [("cinnamonQueued", "Запросы")], 1),
+            ("Целевая доля сброса, %", [("cinnamonRejectionRatio", "PI")], 100),
+            ("Выполнение без очереди, мс", [("cinnamonReferenceLatencyMs", "Опорная"), ("cinnamonSampleLatencyMs", "Сглаженная p90")], 1),
+            ("PI-регулятор", [("cinnamonPiError", "Ошибка"), ("cinnamonPiIntegral", "Интеграл")], 1),
+            ("Ковариация / сбросы опорной задержки", [("cinnamonCovariance", "Ковариация"), ("cinnamonReferenceResets", "Сбросы")], 1),
+        ]
+        fig, axes = plt.subplots(3, 2, figsize=(12, 10), layout="constrained")
+        for ax, (title, fields, scale) in zip(axes.flat, panels):
+            for field, label in fields:
+                values = [number(s[field]) * scale if s.get(field) else math.nan for s in samples]
+                ax.plot(seconds, values, label=label)
+            ax.set_title(title, fontsize=10)
+            ax.set_xlabel("Время от старта k6, с")
+            ax.grid(alpha=.25)
+            ax.legend(fontsize=8)
+        fig.suptitle(f"Cinnamon без когорт: {run}; группа default", fontsize=11)
+        fig.savefig(directory / (run + ".cinnamon.png"), dpi=160)
+        plt.close(fig)
+
+
 def analyze(directory):
     """Каждый поток проверяется отдельно: недостигнутая нагрузка исключает весь прогон."""
     manifest = read_json(directory / "manifest.json")
@@ -477,6 +507,8 @@ def analyze(directory):
         fig.suptitle(caption, fontsize=9)
         fig.savefig(directory / "io-resource.png", dpi=180)
         plt.close(fig)
+    if manifest["strategy"] == "Cinnamon":
+        plot_cinnamon_timeseries(directory, {r["run"] for r in valid_rows if r["mode"] == "on"})
     print(
         f"{manifest['scenario']} / {workload}: {len(runs)}/{expected_runs} прогонов; исключено: {invalid}"
     )
