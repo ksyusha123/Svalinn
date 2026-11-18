@@ -1,4 +1,4 @@
-import { createExperiment } from './workload-model.js';
+import { createExperiment } from './profile-model.js';
 
 // Характер работы выбирается параметром WORKLOAD: Cpu, Io, Mixed или Delay.
 const experiment = createExperiment('LowFlood');

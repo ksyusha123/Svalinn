@@ -98,7 +98,13 @@ public static class SvalinnExtensions
                     ["adaptive_inflight"] = snapshot.Inflight,
                     ["adaptive_reference_latency_ms"] = snapshot.ReferenceLatencyMs,
                     ["adaptive_sample_latency_ms"] = snapshot.SampleLatencyMs,
-                    ["adaptive_probing"] = snapshot.Probing ? 1 : 0
+                    ["adaptive_probing"] = snapshot.Probing ? 1 : 0,
+                    ["adaptive_latency_threshold_ms"] = snapshot.LatencyThresholdMs,
+                    ["adaptive_slow_windows"] = snapshot.SlowWindows,
+                    ["adaptive_window_samples"] = snapshot.WindowSamples,
+                    ["adaptive_reference_windows"] = snapshot.ReferenceWindows,
+                    ["adaptive_latency_backoffs_total"] = snapshot.LatencyBackoffs,
+                    ["adaptive_failure_backoffs_total"] = snapshot.FailureBackoffs
                 };
                 foreach (var metric in gauges)
                     text += $"# TYPE svalinn_{metric.Key} gauge\nsvalinn_{metric.Key} {metric.Value.ToString(CultureInfo.InvariantCulture)}\n";

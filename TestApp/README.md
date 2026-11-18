@@ -60,7 +60,9 @@ dotnet run --project TestApp --launch-profile http
 
 ## Стратегии Svalinn
 
-`Svalinn:Strategy` выбирает `Inflight` (по умолчанию) или `Cpu`.
+`Svalinn:Strategy` выбирает `Inflight` (по умолчанию), `Cpu`, `Adaptive` или `Cinnamon`.
+Адаптивные стратегии и их параметры описаны в [Adaptive](../Svalinn/ADAPTIVE.md)
+и [Cinnamon](../Svalinn/CINNAMON.md).
 `Inflight` использует число активных запросов. `Cpu` использует загрузку CPU
 процесса, которую один фоновый сервис измеряет с заданным интервалом. В обработчике
 запроса читается опубликованный снимок; отдельного измерения CPU на каждый запрос нет.
@@ -106,7 +108,7 @@ dotnet run --project TestApp -c Release --no-build --no-launch-profile -- `
 `process_cpu_percent`, `process_cpu_smoothed_percent`, `cpu_overloaded`,
 `cpu_sample_fresh`, `cpu_processor_capacity`, `cpu_sample_age_ms`
 (все имена с префиксом `svalinn_`). До первого измерения есть только признак
-свежести 0. Сам `/metrics` остаётся маршрутом Normal и может получить 503.
+свежести 0. `/metrics` обходит Svalinn и доступен при перегрузке.
 В режиме `Inflight` фоновое измерение CPU не выполняется.
 
 Проверки расчёта, гистерезиса, допуска и жизненного цикла сборщика запускаются
@@ -137,9 +139,9 @@ dotnet run --project Svalinn.Tests -c Release
 CPU, I/O и их телеметрия включаются **вместе** через `CpuBenchmark:Enabled=true`.
 Отдельного флага включения I/O сейчас нет.
 
-`/benchmark/telemetry` обходит Svalinn и не увеличивает его счётчик активных запросов.
+`/benchmark/telemetry` и `/metrics` обходят Svalinn и не увеличивают его счётчик активных запросов.
 `/benchmark/cpu/info` имеет Critical-приоритет. Остальные служебные маршруты из
-таблицы проходят через Svalinn с приоритетом Normal и могут получить `503`.
+таблицы, кроме `/metrics`, проходят через Svalinn с приоритетом Normal и могут получить `503`.
 
 ## Модели работы
 
@@ -169,7 +171,7 @@ CPU, I/O и их телеметрия включаются **вместе** че
 ### I/O
 
 Все приоритеты используют один `SemaphoreSlim`. По умолчанию одновременно
-обслуживаются 4 запроса по 100 мс; остальные асинхронно ждут места. Это модель
+обслуживаются 4 запроса со случайной задержкой 100–200 мс (150 ± 50 мс); остальные асинхронно ждут места. Это модель
 ограниченной зависимости, а не реальная БД, сеть или диск. Очередь не имеет
 отдельного ограничения длины. Ожидание и обслуживание учитывают отмену;
 занятое место освобождается при завершении или отмене обслуживания.
@@ -197,7 +199,8 @@ Mixed создаёт генератор k6: часть запросов идёт
 | `CpuBenchmark:MinWorkerThreads` | `16` | 1–256; минимум рабочих потоков ThreadPool |
 | `CpuBenchmark:AffinityMask` | `0` | При включении требуется положительная маска доступных CPU |
 | `IoBenchmark:Slots` | `4` | 1–256 мест общего пула |
-| `IoBenchmark:ServiceMs` | `100` | 1–10000 мс обслуживания |
+| `IoBenchmark:ServiceMs` | `150` | 1–10000 мс, центр диапазона обслуживания |
+| `IoBenchmark:ServiceJitterMs` | `50` | 0–9999 мс, равномерный разброс ±; итог ограничен 1–10000 мс |
 
 В `appsettings.json` также заданы `Svalinn:Enabled=true`, `MaxConcurrentRequests=4`,
 `MinimumPriorityWhenOverloaded=High`, `AlwaysAllowCriticalRequests=true`,
@@ -210,7 +213,7 @@ Mixed создаёт генератор k6: часть запросов идёт
 dotnet run --project TestApp -c Release --no-build --no-launch-profile -- `
   --urls http://127.0.0.1:5026 `
   --CpuBenchmark:Enabled=true --CpuBenchmark:AffinityMask=1 `
-  --CpuBenchmark:Iterations=100000 --IoBenchmark:Slots=4 --IoBenchmark:ServiceMs=100
+  --CpuBenchmark:Iterations=100000 --IoBenchmark:Slots=4 --IoBenchmark:ServiceMs=150
 ```
 
 Маска `1` выбирает логический CPU 0. Она должна соответствовать доступным
@@ -240,3 +243,5 @@ dotnet run --project TestApp -c Release --no-build --no-launch-profile -- `
 используют порты 5029, 5027 и 5028 соответственно; параметр `-Port` меняет порт.
 Они проверяют задержки и приоритеты, работу CPU, общую ёмкость I/O, очередь,
 отмену и возврат места. Логи сохраняются в `LoadTesting/results/`.
+
+Задержка выбирается независимо для каждого I/O-запроса до ожидания места, включая запросы с заголовком `X-Benchmark-Service-Ms`. Ответ `serviceMs` содержит выбранную задержку. Для фиксированной задержки задайте `IoBenchmark:ServiceJitterMs=0`.

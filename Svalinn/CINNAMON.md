@@ -117,7 +117,7 @@ bash ./LoadTesting/run-experiment.sh --strategy Cinnamon --scenario SuccessDisas
 
 Python/Git Bash runner сохраняет все настройки Cinnamon в manifest, снимок
 исходников и контрольную сумму сборки. При resume изменения параметров запрещены.
-PowerShell-runner исторического формата пока поддерживает только Inflight/Cpu.
+Профили переходных процессов и полная исследовательская матрица описаны в [LoadTesting](../LoadTesting/README.md).
 Для сравнения компонентов: --cinnamon-disable-pi или --cinnamon-disable-auto-tuner.
 Остальные параметры представлены одноимёнными --cinnamon-* аргументами.
 

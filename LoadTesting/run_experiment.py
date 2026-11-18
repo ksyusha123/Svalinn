@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import json
 import os
 import shutil
 import sys
@@ -10,6 +11,7 @@ import zipfile
 from pathlib import Path
 
 import psutil
+from load_profiles import PROFILES, phases, validate_profile
 from runner_common import (
     DLL,
     LOAD_TESTING,
@@ -63,21 +65,32 @@ ADAPTIVE_PARAMETERS = {
     "min_limit": (int, 1, 100000, 1, "MinLimit"),
     "max_limit": (int, 1, 100000, 256, "MaxLimit"),
     "update_interval_ms": (int, 10, 60000, 500, "UpdateIntervalMs"),
-    "min_samples": (int, 1, 1024, 10, "MinSamples"),
+    "min_samples": (int, 1, 1024, 30, "MinSamples"),
     "probe_interval_ms": (int, 5000, 3600000, 60000, "ProbeIntervalMs"),
+    "reference_window_count": (int, 1, 31, 3, "ReferenceWindowCount"),
+    "consecutive_slow_windows": (int, 1, 20, 2, "ConsecutiveSlowWindows"),
+    "min_latency_increase_ms": (float, 0, 60000, 40, "MinLatencyIncreaseMs"),
+    "probe_min_samples": (int, 1, 1024, 10, "ProbeMinSamples"),
+    "probe_max_duration_ms": (int, 10, 60000, 2000, "ProbeMaxDurationMs"),
+    "priority_demand_window_ms": (int, 1, 60000, 500, "PriorityDemandWindowMs"),
 }
 
 
 def adaptive_settings(a):
-    return {spec[4]: getattr(a, "adaptive_" + key) for key, spec in ADAPTIVE_PARAMETERS.items()}
+    settings = {
+        spec[4]: getattr(a, "adaptive_" + key)
+        for key, spec in ADAPTIVE_PARAMETERS.items()
+    }
+    settings["EnablePriorityBorrowing"] = not a.adaptive_disable_priority_borrowing
+    return settings
 
 
 CINNAMON_PARAMETERS = {
-    "initial_limit": (int, 1, 100000, 16, "InitialLimit"),
+    "initial_limit": (int, 1, 100000, 4, "InitialLimit"),
     "min_limit": (int, 1, 100000, 1, "MinLimit"),
     "max_limit": (int, 1, 100000, 1024, "MaxLimit"),
-    "queue_capacity": (int, 0, 100000, 1024, "QueueCapacity"),
-    "queue_timeout_ms": (int, 1, 60000, 1000, "QueueTimeoutMs"),
+    "queue_capacity": (int, 0, 100000, 16, "QueueCapacity"),
+    "queue_timeout_ms": (int, 1, 60000, 500, "QueueTimeoutMs"),
     "max_groups": (int, 1, 1024, 64, "MaxGroups"),
     "pi_interval_ms": (int, 10, 60000, 500, "PiIntervalMs"),
     "integral_window_ms": (int, 10, 600000, 30000, "IntegralWindowMs"),
@@ -90,7 +103,13 @@ CINNAMON_PARAMETERS = {
     "latency_sample_capacity": (int, 1, 65536, 4096, "LatencySampleCapacity"),
     "latency_percentile": (float, 0.000001, 1, 0.9, "LatencyPercentile"),
     "smoothing_factor": (float, 0.000001, 1, 0.2, "SmoothingFactor"),
-    "reference_reset_interval_ms": (int, 10, 3600000, 60000, "ReferenceResetIntervalMs"),
+    "reference_reset_interval_ms": (
+        int,
+        10,
+        3600000,
+        60000,
+        "ReferenceResetIntervalMs",
+    ),
     "covariance_window": (int, 2, 1000, 50, "CovarianceWindow"),
     "lower_bound_reset_windows": (int, 1, 1000, 3, "LowerBoundResetWindows"),
     "inflight_headroom_multiplier": (float, 1, 100, 10, "InflightHeadroomMultiplier"),
@@ -98,8 +117,14 @@ CINNAMON_PARAMETERS = {
 
 
 def cinnamon_settings(a):
-    result = {spec[4]: getattr(a, "cinnamon_" + key) for key, spec in CINNAMON_PARAMETERS.items()}
-    result.update(EnablePi=not a.cinnamon_disable_pi, EnableAutoTuner=not a.cinnamon_disable_auto_tuner)
+    result = {
+        spec[4]: getattr(a, "cinnamon_" + key)
+        for key, spec in CINNAMON_PARAMETERS.items()
+    }
+    result.update(
+        EnablePi=not a.cinnamon_disable_pi,
+        EnableAutoTuner=not a.cinnamon_disable_auto_tuner,
+    )
     return result
 
 
@@ -108,21 +133,39 @@ def validate_cinnamon(a):
     if not s["MinLimit"] <= s["InitialLimit"] <= s["MaxLimit"]:
         raise ValueError("Cinnamon limits must satisfy min <= initial <= max.")
     if not s["PiIntervalMs"] <= s["LatencyMinIntervalMs"] <= s["LatencyMaxIntervalMs"]:
-        raise ValueError("Cinnamon intervals must satisfy PI <= latency min <= latency max.")
-    if s["IntegralWindowMs"] < s["PiIntervalMs"] or s["ReferenceResetIntervalMs"] < s["LatencyMinIntervalMs"]:
+        raise ValueError(
+            "Cinnamon intervals must satisfy PI <= latency min <= latency max."
+        )
+    if (
+        s["IntegralWindowMs"] < s["PiIntervalMs"]
+        or s["ReferenceResetIntervalMs"] < s["LatencyMinIntervalMs"]
+    ):
         raise ValueError("Cinnamon integral/reset windows are too short.")
     if s["LatencyMinSamples"] > s["LatencySampleCapacity"]:
         raise ValueError("Cinnamon minimum samples exceed reservoir capacity.")
 
 
 def strategy_options(parser):
+    parser.add_argument("--adaptive-disable-priority-borrowing", action="store_true")
     for key, (kind, low, high, default, _) in CINNAMON_PARAMETERS.items():
-        parser.add_argument("--cinnamon-" + key.replace("_", "-"), type=bounded(kind, low, high), default=default)
+        parser.add_argument(
+            "--cinnamon-" + key.replace("_", "-"),
+            type=bounded(kind, low, high),
+            default=default,
+        )
     parser.add_argument("--cinnamon-disable-pi", action="store_true")
     parser.add_argument("--cinnamon-disable-auto-tuner", action="store_true")
     for key, (kind, low, high, default, _) in ADAPTIVE_PARAMETERS.items():
-        parser.add_argument("--adaptive-" + key.replace("_", "-"), type=bounded(kind, low, high), default=default)
-    parser.add_argument("--strategy", choices=["Inflight", "Cpu", "Adaptive", "Cinnamon"], default="Inflight")
+        parser.add_argument(
+            "--adaptive-" + key.replace("_", "-"),
+            type=bounded(kind, low, high),
+            default=default,
+        )
+    parser.add_argument(
+        "--strategy",
+        choices=["Inflight", "Cpu", "Adaptive", "Cinnamon"],
+        default="Inflight",
+    )
     parser.add_argument(
         "--cpu-sample-interval-ms", type=bounded(int, 50, 60000), default=250
     )
@@ -147,15 +190,31 @@ def parser():
     p.add_argument("--rates", type=rates)
     p.add_argument("--low-rates", type=rates)
     p.add_argument("--critical-rate", type=bounded(int, 1, 1000))
+    p.add_argument("--profile", choices=PROFILES, default="Plateau")
+    p.add_argument(
+        "--slo-definition",
+        choices=("SuccessfulLatency", "TimelySuccessRatio"),
+        default="SuccessfulLatency",
+    )
+    p.add_argument(
+        "--critical-success-target-percent", type=bounded(float, 0.000001, 100)
+    )
+    p.add_argument("--modes", nargs="+", choices=("off", "on"), default=["off", "on"])
+    p.add_argument("--baseline-rate", type=bounded(int, 1, 100000), default=20)
+    p.add_argument("--baseline-seconds", type=bounded(int, 5, 600), default=30)
+    p.add_argument("--recovery-seconds", type=bounded(int, 5, 600), default=90)
+    p.add_argument("--spike-seconds", type=bounded(int, 1, 60), default=10)
+    p.add_argument("--degraded-io-service-ms", type=bounded(int, 1, 10000), default=200)
     specs = {
-        "duration-seconds": (5, 600, 30),
+        "duration-seconds": (5, 600, 120),
         "repetitions": (1, 20, 3),
         "warmup-requests": (1, 1000, 20),
         "iterations": (1000, 10000000, 100000),
         "min-worker-threads": (1, 256, 16),
         "max-concurrent-requests": (1, 10000, 4),
         "io-slots": (1, 256, 4),
-        "io-service-ms": (1, 10000, 100),
+        "io-service-ms": (1, 10000, 150),
+        "io-service-jitter-ms": (0, 9999, 50),
         "timeout-seconds": (1, 60, 5),
         "port": (1, 65535, 5026),
         "slo-ms": (1, 60000, None),
@@ -179,7 +238,9 @@ def validate_adaptive(a):
     if not a.adaptive_min_limit <= a.adaptive_initial_limit <= a.adaptive_max_limit:
         raise ValueError("Adaptive limits must satisfy min <= initial <= max.")
     if a.adaptive_update_interval_ms > 5000:
-        raise ValueError("Adaptive update interval must not exceed the 5000 ms sample age.")
+        raise ValueError(
+            "Adaptive update interval must not exceed the 5000 ms sample age."
+        )
 
 
 def validate(a):
@@ -204,16 +265,17 @@ def validate(a):
     )
     a.critical_rate = a.critical_rate if a.critical_rate is not None else 5
     if a.slo_ms is None:
-        a.slo_ms = 1200 if a.workload == "Delay" else 250
+        a.slo_ms = 1200 if a.workload == "Delay" else 1000
     if a.high_slo_ms is None:
         a.high_slo_ms = 2500 if a.workload == "Delay" else a.slo_ms
+    validate_profile(a)
     if a.resume and a.output_directory is None:
         raise ValueError("Для --resume укажите --output-directory.")
     if a.output_directory is None:
         a.output_directory = (
             LOAD_TESTING
             / "results"
-            / f"{a.scenario}-{a.workload}-{a.strategy}-{stamp()}"
+            / f"{a.scenario}-{a.profile}-{a.workload}-{a.strategy}-{stamp()}"
         )
     a.output_directory = a.output_directory.resolve()
     check_masks(a.server_affinity_mask, a.generator_affinity_mask)
@@ -224,9 +286,11 @@ def settings(a):
     values = {}
     names = (
         "strategy cpu_sample_interval_ms cpu_smoothing_factor cpu_overload_percent cpu_recovery_percent "
-        "workload io_slots io_service_ms warmup_requests scenario duration_seconds repetitions iterations "
+        "workload io_slots io_service_ms io_service_jitter_ms warmup_requests scenario duration_seconds repetitions iterations "
         "min_worker_threads max_concurrent_requests critical_delay_ms high_delay_ms normal_delay_ms low_delay_ms "
-        "high_slo_ms slo_ms timeout_seconds server_affinity_mask generator_affinity_mask"
+        "high_slo_ms slo_ms timeout_seconds server_affinity_mask generator_affinity_mask "
+        "profile baseline_rate baseline_seconds recovery_seconds spike_seconds degraded_io_service_ms "
+        "slo_definition critical_success_target_percent"
     )
     for name in names.split():
         parts = name.split("_")
@@ -274,6 +338,8 @@ def settings(a):
         values["adaptive"] = adaptive_settings(a)
     if a.strategy == "Cinnamon":
         values["cinnamon"] = cinnamon_settings(a)
+    values["phasePlans"] = {str(load): phases(a, load) for load in values["loadLevels"]}
+    values["modes"] = a.modes
     return values
 
 
@@ -287,7 +353,10 @@ def source_files():
         "TestApp/appsettings.json",
         "LoadTesting/k6/low-flood.js",
         "LoadTesting/k6/success-disaster.js",
-        "LoadTesting/k6/workload-model.js",
+        "LoadTesting/k6/profile-model.js",
+        "LoadTesting/load_profiles.py",
+        "LoadTesting/run_adaptive_suite.py",
+        "LoadTesting/plotting/analyze_profiles.py",
         "LoadTesting/plotting/analyze-results.py",
         "LoadTesting/run_experiment.py",
         "LoadTesting/runner_common.py",
@@ -373,6 +442,7 @@ def start_server(a, enabled, name):
         "DelayBenchmark:Slo:HighP95LatencyMs": a.high_slo_ms,
         "IoBenchmark:Slots": a.io_slots,
         "IoBenchmark:ServiceMs": a.io_service_ms,
+        "IoBenchmark:ServiceJitterMs": a.io_service_jitter_ms,
         "Svalinn:Enabled": enabled,
         "Svalinn:Strategy": a.strategy,
         "Svalinn:Cpu:SampleIntervalMs": a.cpu_sample_interval_ms,
@@ -392,8 +462,18 @@ def start_server(a, enabled, name):
             for p in PRIORITIES
         }
     )
-    config.update({"Svalinn:Adaptive:" + key: value for key, value in adaptive_settings(a).items()})
-    config.update({"Svalinn:Cinnamon:" + key: value for key, value in cinnamon_settings(a).items()})
+    config.update(
+        {
+            "Svalinn:Adaptive:" + key: value
+            for key, value in adaptive_settings(a).items()
+        }
+    )
+    config.update(
+        {
+            "Svalinn:Cinnamon:" + key: value
+            for key, value in cinnamon_settings(a).items()
+        }
+    )
     url = f"http://127.0.0.1:{a.port}"
     args = [executable("dotnet"), DLL, "--urls", url] + [
         f"--{k}={str(v).lower() if isinstance(v, bool) else v}"
@@ -494,15 +574,27 @@ def telemetry(a):
 
 
 CINNAMON_METRICS = {
-    "limit": "cinnamonLimit", "inflight": "cinnamonInflight", "queued": "cinnamonQueued",
-    "rejection_ratio": "cinnamonRejectionRatio", "pi_error": "cinnamonPiError", "pi_integral": "cinnamonPiIntegral",
-    "reference_latency_ms": "cinnamonReferenceLatencyMs", "sample_latency_ms": "cinnamonSampleLatencyMs",
-    "estimated_queue": "cinnamonEstimatedQueue", "covariance": "cinnamonCovariance",
-    "reference_resets_total": "cinnamonReferenceResets", "queue_entered_total": "cinnamonEntered",
-    "dispatched_total": "cinnamonDispatched", "priority_rejected_total": "cinnamonPriorityRejected",
-    "queue_full_total": "cinnamonQueueFull", "queue_timeout_total": "cinnamonQueueTimeout",
-    "queue_cancelled_total": "cinnamonQueueCancelled", "successful_total": "cinnamonSuccessful",
-    "failed_total": "cinnamonFailed", "queue_wait_ms_sum": "cinnamonQueueWaitMsSum", "queue_wait_ms_count": "cinnamonQueueWaitCount",
+    "limit": "cinnamonLimit",
+    "inflight": "cinnamonInflight",
+    "queued": "cinnamonQueued",
+    "rejection_ratio": "cinnamonRejectionRatio",
+    "pi_error": "cinnamonPiError",
+    "pi_integral": "cinnamonPiIntegral",
+    "reference_latency_ms": "cinnamonReferenceLatencyMs",
+    "sample_latency_ms": "cinnamonSampleLatencyMs",
+    "estimated_queue": "cinnamonEstimatedQueue",
+    "covariance": "cinnamonCovariance",
+    "reference_resets_total": "cinnamonReferenceResets",
+    "queue_entered_total": "cinnamonEntered",
+    "dispatched_total": "cinnamonDispatched",
+    "priority_rejected_total": "cinnamonPriorityRejected",
+    "queue_full_total": "cinnamonQueueFull",
+    "queue_timeout_total": "cinnamonQueueTimeout",
+    "queue_cancelled_total": "cinnamonQueueCancelled",
+    "successful_total": "cinnamonSuccessful",
+    "failed_total": "cinnamonFailed",
+    "queue_wait_ms_sum": "cinnamonQueueWaitMsSum",
+    "queue_wait_ms_count": "cinnamonQueueWaitCount",
 }
 
 
@@ -510,16 +602,37 @@ def parse_cinnamon_metrics(text):
     result = dict.fromkeys(CINNAMON_METRICS.values())
     for line in text.splitlines():
         for name, field in CINNAMON_METRICS.items():
-            prefix = 'svalinn_cinnamon_' + name + '{group="default"} '
+            prefix = "svalinn_cinnamon_" + name + '{group="default"} '
             if line.startswith(prefix):
-                result[field] = float(line[len(prefix):])
+                result[field] = float(line[len(prefix) :])
                 break
+    return result
+
+
+ADAPTIVE_METRICS = {
+    "limit": "adaptiveLimit",
+    "inflight": "adaptiveInflight",
+    "reference_latency_ms": "adaptiveReferenceLatencyMs",
+    "sample_latency_ms": "adaptiveSampleLatencyMs",
+    "probing": "adaptiveProbing",
+}
+
+
+def parse_adaptive_metrics(body):
+    result = dict.fromkeys(ADAPTIVE_METRICS.values())
+    for line in body.splitlines():
+        for name, field in ADAPTIVE_METRICS.items():
+            prefix = "svalinn_adaptive_" + name + " "
+            if line.startswith(prefix):
+                result[field] = float(line[len(prefix) :])
     return result
 
 
 def run_one(a, current, repetition, load, mode, name, prefix):
     print(f"Выполняется прогон {name}", flush=True)
     output = a.output_directory
+    plan = phases(a, load)
+    duration = sum(p["durationSeconds"] for p in plan)
     with start_server(a, mode == "on", name) as server:
         warm_up(a)
         before = telemetry(a) if a.workload != "Delay" else None
@@ -529,9 +642,15 @@ def run_one(a, current, repetition, load, mode, name, prefix):
             "CRITICAL_RATE": a.critical_rate,
             "LOW_RATE": load,
             "RATE": load,
-            "DURATION_SECONDS": a.duration_seconds,
+            "DURATION_SECONDS": duration,
+            "PHASES_JSON": json.dumps(plan),
+            "PROFILE": a.profile,
             "SLO_MS": a.slo_ms,
             "HIGH_SLO_MS": a.high_slo_ms,
+            "SLO_DEFINITION": a.slo_definition,
+            "CRITICAL_SUCCESS_TARGET_PERCENT": ""
+            if a.critical_success_target_percent is None
+            else a.critical_success_target_percent,
             "TIMEOUT_SECONDS": a.timeout_seconds,
             "WORKLOAD": a.workload,
             "MODE": mode,
@@ -579,12 +698,24 @@ def run_one(a, current, repetition, load, mode, name, prefix):
                         pass
                 if server.process.poll() is not None:
                     raise RuntimeError("Сервер завершился во время нагрузочного теста.")
-                cinnamon = dict.fromkeys(CINNAMON_METRICS.values())
-                if a.strategy == "Cinnamon" and mode == "on":
+                controller = dict.fromkeys(
+                    (
+                        CINNAMON_METRICS
+                        if a.strategy == "Cinnamon"
+                        else ADAPTIVE_METRICS
+                    ).values()
+                )
+                if a.strategy in ("Cinnamon", "Adaptive") and mode == "on":
                     try:
-                        status, _, body = request(f"http://127.0.0.1:{a.port}/metrics", .5)
+                        status, _, body = request(
+                            f"http://127.0.0.1:{a.port}/metrics", 0.5
+                        )
                         if status == 200 and isinstance(body, str):
-                            cinnamon = parse_cinnamon_metrics(body)
+                            controller = (
+                                parse_cinnamon_metrics
+                                if a.strategy == "Cinnamon"
+                                else parse_adaptive_metrics
+                            )(body)
                     except (OSError, ValueError, RuntimeError):
                         pass
                 now, cpu = time.perf_counter() - started, server.cpu_time()
@@ -596,6 +727,7 @@ def run_one(a, current, repetition, load, mode, name, prefix):
                 samples.append(
                     {
                         "elapsedSeconds": now,
+                        "sampleEpochMs": time.time() * 1000,
                         "serverCpuPercentOfOneLogicalProcessor": 100
                         * (cpu - last_cpu)
                         / (now - last_time),
@@ -608,10 +740,10 @@ def run_one(a, current, repetition, load, mode, name, prefix):
                         "ioWaiting": state["waiting"] if state else None,
                     }
                 )
-                if a.strategy == "Cinnamon":
-                    samples[-1].update(cinnamon)
+                if a.strategy in ("Cinnamon", "Adaptive"):
+                    samples[-1].update(controller)
                 last_time, last_cpu, last_generator_cpu = now, cpu, generator_cpu
-                if now > a.duration_seconds + a.timeout_seconds + 60:
+                if now > duration + a.timeout_seconds + 60:
                     raise RuntimeError(
                         "Генератор нагрузки превысил допустимое время работы."
                     )
@@ -697,7 +829,7 @@ def run(a):
             calibrate(a)
         for repetition in range(1, a.repetitions + 1):
             for load in current["loadLevels"]:
-                for mode in ("off", "on") if repetition % 2 else ("on", "off"):
+                for mode in ordered_modes(a.modes, repetition):
                     name = f"r{repetition}-{'rate' if a.scenario == 'SuccessDisaster' else 'low'}{load}-{mode}"
                     if a.resume:
                         if all(
@@ -722,6 +854,14 @@ def run(a):
                 ]
             )
     print(f"Результаты: {output}", flush=True)
+
+
+def ordered_modes(modes, repetition):
+    return [
+        mode
+        for mode in (("off", "on") if repetition % 2 else ("on", "off"))
+        if mode in modes
+    ]
 
 
 if __name__ == "__main__":

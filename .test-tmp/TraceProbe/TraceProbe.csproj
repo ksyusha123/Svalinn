@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Reference Include="Microsoft.Diagnostics.NETCore.Client"><HintPath>$(USERPROFILE)/.nuget/packages/microsoft.diagnostics.netcore.client/0.2.510501/lib/net6.0/Microsoft.Diagnostics.NETCore.Client.dll</HintPath></Reference>
+    <Reference Include="Microsoft.Diagnostics.Tracing.TraceEvent"><HintPath>$(USERPROFILE)/.nuget/packages/microsoft.diagnostics.tracing.traceevent/3.1.21/lib/netstandard2.0/Microsoft.Diagnostics.Tracing.TraceEvent.dll</HintPath></Reference>
+    <Reference Include="Microsoft.Diagnostics.FastSerialization"><HintPath>$(USERPROFILE)/.nuget/packages/microsoft.diagnostics.tracing.traceevent/3.1.21/lib/netstandard2.0/Microsoft.Diagnostics.FastSerialization.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>

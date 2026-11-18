@@ -13,6 +13,13 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
     private readonly int retryAfterSeconds;
     private readonly TimeProvider clock;
     private readonly double[] samples;
+    private readonly int[] activeByPriority = new int[4];
+    private readonly long[] lastDemand = new long[4];
+    private readonly bool[] demandSeen = new bool[4];
+    private readonly Queue<double> referenceWindows = new();
+    private readonly Queue<double> probeSamples = new();
+    private int slowWindows;
+    private long latencyBackoffs, failureBackoffs;
     private int sampleCount, sampleIndex, failures, completed, inflight, limit, savedLimit, generation;
     private bool saturated, probing;
     private long windowStarted, lastProbe;
@@ -48,18 +55,24 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
         lock (gate)
         {
             Update();
+            // Record rejected arrivals too, so borrowers yield newly freed slots.
+            var priorityIndex = (int)context.Priority;
+            lastDemand[priorityIndex] = clock.GetTimestamp();
+            demandSeen[priorityIndex] = true;
             var decision = Decision(context.Priority);
             lease = null;
             if (!decision.IsAllowed) { saturated = true; return decision; }
             inflight++;
+            activeByPriority[priorityIndex]++;
             if (inflight >= Ceiling(context.Priority)) saturated = true;
-            lease = new Lease(this, generation);
+            lease = new Lease(this, generation, context.Priority);
             return decision;
         }
     }
 
     private int Ceiling(RequestPriority priority)
     {
+        if (settings.EnablePriorityBorrowing && !HasHigherPriorityDemand(priority)) return limit;
         var fraction = priority switch
         {
             RequestPriority.Low => settings.LowPriorityFraction,
@@ -70,15 +83,26 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
         return Math.Max(1, (int)Math.Floor(limit * fraction));
     }
 
+    private bool HasHigherPriorityDemand(RequestPriority priority)
+    {
+        var now = clock.GetTimestamp();
+        for (var index = (int)priority + 1; index < activeByPriority.Length; index++)
+            if (activeByPriority[index] > 0 || (demandSeen[index]
+                && clock.GetElapsedTime(lastDemand[index], now).TotalMilliseconds < settings.PriorityDemandWindowMs))
+                return true;
+        return false;
+    }
+
     private LoadSheddingDecision Decision(RequestPriority priority) => inflight < Ceiling(priority)
         ? LoadSheddingDecision.Allow("Adaptive capacity is available")
         : LoadSheddingDecision.Reject($"Adaptive limit: {inflight}/{limit} active; priority ceiling {Ceiling(priority)}", retryAfterSeconds);
 
-    private void Release(int requestGeneration, TimeSpan? duration, bool succeeded)
+    private void Release(int requestGeneration, RequestPriority priority, TimeSpan? duration, bool succeeded)
     {
         lock (gate)
         {
             inflight--;
+            activeByPriority[(int)priority]--;
             // Requests admitted before a probe must not contaminate its reference measurement.
             if (requestGeneration != generation || duration is null) return;
             completed++;
@@ -109,11 +133,17 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
             limit = settings.MinLimit;
             probing = true;
             generation++;
+            slowWindows = 0;
             ResetWindow(now);
             return;
         }
         var age = clock.GetElapsedTime(windowStarted, now).TotalMilliseconds;
-        if (age < settings.UpdateIntervalMs || (completed < settings.MinSamples && age < settings.MaxSampleAgeMs)) return;
+        if (age < settings.UpdateIntervalMs) return;
+        if (probing)
+        {
+            if (sampleCount < settings.ProbeMinSamples && age < settings.ProbeMaxDurationMs) return;
+        }
+        else if (failures == 0 && sampleCount < settings.MinSamples && age < settings.MaxSampleAgeMs) return;
         if (sampleCount > 0)
         {
             var sorted = samples.AsSpan(0, sampleCount).ToArray();
@@ -122,29 +152,83 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
         }
         if (probing)
         {
-            if (sampleCount > 0) referenceMs = sampleMs;
+            // Pool short probes until they provide a full-sized reference estimate.
+            for (var index = 0; index < sampleCount; index++) probeSamples.Enqueue(samples[index]);
+            if (probeSamples.Count >= settings.MinSamples)
+            {
+                var sorted = probeSamples.Order().ToArray();
+                AddReference(sorted[(int)Math.Ceiling(sorted.Length * .9) - 1]);
+                probeSamples.Clear();
+            }
             limit = savedLimit;
             probing = false;
             lastProbe = now;
             generation++;
         }
-        else if (completed > 0)
+        else if (failures > 0)
         {
-            if (sampleCount > 0 && (referenceMs == 0 || sampleMs < referenceMs)) referenceMs = sampleMs;
-            if (failures > 0 || (sampleCount > 0 && sampleMs > referenceMs * (1 + settings.LatencyTolerance)))
-                limit = Math.Max(settings.MinLimit, Math.Min(limit - 1, (int)Math.Floor(limit * settings.DecreaseFactor)));
-            else if (sampleCount > 0 && saturated)
-                limit = Math.Min(settings.MaxLimit, limit + 1);
+            if (Decrease()) failureBackoffs++;
+            slowWindows = 0;
         }
+        else if (sampleCount >= settings.MinSamples)
+        {
+            // Bootstrap from several full windows, never from a lucky minimum.
+            var initializing = referenceMs == 0;
+            if (initializing) AddReference(sampleMs);
+            var slow = referenceMs > 0 && sampleMs > LatencyThresholdMs;
+            if (slow)
+            {
+                slowWindows++;
+                if (slowWindows >= settings.ConsecutiveSlowWindows)
+                {
+                    if (Decrease()) latencyBackoffs++;
+                    slowWindows = 0;
+                }
+            }
+            else
+            {
+                slowWindows = 0;
+                // Saturated windows must not teach the baseline to follow a queue.
+                if (!initializing && referenceMs > 0 && !saturated) AddReference(sampleMs);
+                if (saturated)
+                    limit = Math.Min(settings.MaxLimit, limit + 1);
+            }
+        }
+        else slowWindows = 0; // Sparse, partial windows are not evidence of sustained latency.
         ResetWindow(now);
+    }
+
+    private double LatencyThresholdMs => referenceMs == 0 ? 0
+        : referenceMs + Math.Max(referenceMs * settings.LatencyTolerance, settings.MinLatencyIncreaseMs);
+
+    private void AddReference(double percentileMs)
+    {
+        referenceWindows.Enqueue(percentileMs);
+        if (referenceWindows.Count > settings.ReferenceWindowCount) referenceWindows.Dequeue();
+        if (referenceWindows.Count < settings.ReferenceWindowCount) return;
+        var ordered = referenceWindows.Order().ToArray();
+        referenceMs = ordered.Length % 2 == 1 ? ordered[ordered.Length / 2]
+            : (ordered[ordered.Length / 2 - 1] + ordered[ordered.Length / 2]) / 2;
+    }
+
+    private bool Decrease()
+    {
+        var previous = limit;
+        limit = Math.Max(settings.MinLimit, Math.Min(limit - 1, (int)Math.Floor(limit * settings.DecreaseFactor)));
+        return limit < previous;
     }
 
     public AdaptiveLoadSnapshot Snapshot()
     {
-        lock (gate) return new(limit, inflight, referenceMs, sampleMs, probing);
+        lock (gate) return new(limit, inflight, referenceMs, sampleMs, probing)
+        {
+            LatencyThresholdMs = LatencyThresholdMs, SlowWindows = slowWindows,
+            WindowSamples = sampleCount, ReferenceWindows = referenceWindows.Count,
+            LatencyBackoffs = latencyBackoffs, FailureBackoffs = failureBackoffs
+        };
     }
 
-    private sealed class Lease(AdaptiveLoadSheddingStrategy owner, int generation) : IRequestExecutionLease
+    private sealed class Lease(AdaptiveLoadSheddingStrategy owner, int generation, RequestPriority priority) : IRequestExecutionLease
     {
         private int released;
         private TimeSpan? duration;
@@ -152,9 +236,17 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
         public void RecordCompletion(TimeSpan elapsed, bool success) { duration = elapsed; succeeded = success; }
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref released, 1) == 0) owner.Release(generation, duration, succeeded);
+            if (Interlocked.Exchange(ref released, 1) == 0) owner.Release(generation, priority, duration, succeeded);
         }
     }
 }
 
-public sealed record AdaptiveLoadSnapshot(int Limit, int Inflight, double ReferenceLatencyMs, double SampleLatencyMs, bool Probing);
+public sealed record AdaptiveLoadSnapshot(int Limit, int Inflight, double ReferenceLatencyMs, double SampleLatencyMs, bool Probing)
+{
+    public double LatencyThresholdMs { get; init; }
+    public int SlowWindows { get; init; }
+    public int WindowSamples { get; init; }
+    public int ReferenceWindows { get; init; }
+    public long LatencyBackoffs { get; init; }
+    public long FailureBackoffs { get; init; }
+}
