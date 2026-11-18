@@ -46,6 +46,10 @@ class ValidationTests(unittest.TestCase):
         a = self.parse("--strategy", "Adaptive", "--adaptive-initial-limit", "8", "--adaptive-max-limit", "32")
         self.assertEqual(runner.adaptive_settings(a)["InitialLimit"], 8)
         self.assertEqual(runner.adaptive_settings(a)["MaxLimit"], 32)
+        self.assertEqual(runner.adaptive_settings(a)["QueueCapacity"], 4)
+        disabled = self.parse("--strategy", "Adaptive", "--adaptive-queue-capacity", "0", "--adaptive-queue-timeout-ms", "50")
+        self.assertEqual(runner.adaptive_settings(disabled)["QueueCapacity"], 0)
+        self.assertEqual(runner.adaptive_settings(disabled)["QueueTimeoutMs"], 50)
         for args in [("--adaptive-min-limit", "10"), ("--adaptive-max-limit", "2"),
                      ("--adaptive-update-interval-ms", "6000")]:
             with self.subTest(args=args), self.assertRaises(ValueError):

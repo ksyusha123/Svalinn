@@ -40,7 +40,8 @@ public sealed class SvalinnMiddleware(
             decision = result.Decision;
             executionLease = result.Lease;
             queueWait = result.QueueWait;
-            state.Set("cinnamon_queue_wait_ms", result.QueueWait.TotalMilliseconds);
+            state.Set(strategy is AdaptiveLoadSheddingStrategy ? "adaptive_queue_wait_ms" : "cinnamon_queue_wait_ms",
+                result.QueueWait.TotalMilliseconds);
         }
         else
         {

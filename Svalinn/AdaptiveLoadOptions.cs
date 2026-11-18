@@ -5,6 +5,9 @@ public sealed class AdaptiveLoadOptions
     public int InitialLimit { get; set; } = 4;
     public int MinLimit { get; set; } = 1;
     public int MaxLimit { get; set; } = 256;
+    // Set capacity to zero for immediate rejection without waiting.
+    public int QueueCapacity { get; set; } = 4;
+    public int QueueTimeoutMs { get; set; } = 250;
     public int UpdateIntervalMs { get; set; } = 500;
     public int MinSamples { get; set; } = 30;
     public int MaxSampleAgeMs { get; set; } = 5000;
@@ -26,6 +29,7 @@ public sealed class AdaptiveLoadOptions
     public double HighPriorityFraction { get; set; } = 0.9;
 
     internal bool IsValid() => MinLimit >= 1 && MinLimit <= InitialLimit && InitialLimit <= MaxLimit
+        && QueueCapacity is >= 0 and <= 65536 && QueueTimeoutMs is >= 1 and <= 60000
         && MaxLimit <= 100000 && UpdateIntervalMs is >= 10 and <= 60000
         && PriorityDemandWindowMs is >= 1 and <= 60000
         && MaxSampleAgeMs >= UpdateIntervalMs && MaxSampleAgeMs <= 60000

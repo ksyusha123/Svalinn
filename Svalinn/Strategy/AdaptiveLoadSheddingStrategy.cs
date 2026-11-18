@@ -6,7 +6,7 @@ namespace Svalinn.Strategy;
 /// Latency-based AIMD admission control. A bounded latency sample estimates queueing;
 /// periodic low-concurrency probes refresh the reference. This is not a Cinnamon replica.
 /// </summary>
-public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrategy
+public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrategy, IAsyncLoadSheddingStrategy, IDisposable
 {
     private readonly object gate = new();
     private readonly AdaptiveLoadOptions settings;
@@ -18,6 +18,11 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
     private readonly bool[] demandSeen = new bool[4];
     private readonly Queue<double> referenceWindows = new();
     private readonly Queue<double> probeSamples = new();
+    private readonly LinkedList<Waiter>[] queues = [new(), new(), new(), new()];
+    private ITimer? queueTimer;
+    private int queued;
+    private bool disposed;
+    private long queueFull, queueTimeouts, queueCancelled;
     private int slowWindows;
     private long latencyBackoffs, failureBackoffs;
     private int sampleCount, sampleIndex, failures, completed, inflight, limit, savedLimit, generation;
@@ -38,13 +43,167 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
         windowStarted = lastProbe = clock.GetTimestamp();
     }
 
-    // A decision preview only. Middleware uses TryAcquire to reserve an actual slot.
+    public ValueTask<RequestAdmission> AcquireAsync(LoadSheddingContext context, CancellationToken cancellationToken)
+    {
+        context.HttpContext.RequestAborted.ThrowIfCancellationRequested();
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            if (disposed) return ValueTask.FromResult(Reject("Adaptive is stopping"));
+            Update();
+            ObserveDemand(context.Priority);
+            ExpireWaiters();
+            // A new higher-priority request may use a reserved free slot even when
+            // lower-priority waiters fill the queue. Same/higher tiers retain FIFO.
+            if (inflight < Ceiling(context.Priority) && !HasQueuedAtOrAbove(context.Priority))
+            {
+                var admission = Grant(context.Priority, clock.GetTimestamp());
+                Drain();
+                return ValueTask.FromResult(admission);
+            }
+            Drain();
+            saturated = true;
+            if (queued >= settings.QueueCapacity)
+            {
+                queueFull++;
+                return ValueTask.FromResult(Reject("Adaptive queue is full"));
+            }
+            var waiter = new Waiter(context.Priority, clock.GetTimestamp());
+            waiter.Node = queues[(int)context.Priority].AddLast(waiter);
+            queued++;
+            // A single timer exists only to wake pending requests: deadlines, reserve expiry,
+            // and probe/limit updates must also progress when no handler completes.
+            queueTimer ??= clock.CreateTimer(_ => TickQueue(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            if (queued == 1) queueTimer.Change(TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(10));
+            Drain();
+            return WaitAsync(waiter, cancellationToken, context.HttpContext.RequestAborted);
+        }
+    }
+
+    private async ValueTask<RequestAdmission> WaitAsync(Waiter waiter, CancellationToken token, CancellationToken aborted)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, aborted);
+        using var registration = linked.Token.Register(() => Cancel(waiter, linked.Token));
+        var admission = await waiter.Completion.Task.ConfigureAwait(false);
+        if (linked.IsCancellationRequested)
+        {
+            admission.Lease?.Dispose();
+            linked.Token.ThrowIfCancellationRequested();
+        }
+        return admission;
+    }
+
+    private void ObserveDemand(RequestPriority priority)
+    {
+        var index = (int)priority;
+        lastDemand[index] = clock.GetTimestamp();
+        demandSeen[index] = true;
+    }
+
+    private RequestAdmission Reject(string reason, TimeSpan wait = default) =>
+        new(LoadSheddingDecision.Reject(reason, retryAfterSeconds), null, wait);
+
+    private RequestAdmission Grant(RequestPriority priority, long started)
+    {
+        inflight++;
+        activeByPriority[(int)priority]++;
+        if (inflight >= Ceiling(priority)) saturated = true;
+        return new(LoadSheddingDecision.Allow("Adaptive capacity is available"),
+            new Lease(this, generation, priority), clock.GetElapsedTime(started));
+    }
+
+    private void Remove(Waiter waiter)
+    {
+        queues[(int)waiter.Priority].Remove(waiter.Node!);
+        waiter.Node = null;
+        queued--;
+    }
+
+    private void Cancel(Waiter waiter, CancellationToken token)
+    {
+        lock (gate)
+        {
+            if (waiter.Node is null) return;
+            Remove(waiter);
+            queueCancelled++;
+            waiter.Completion.TrySetCanceled(token);
+            Drain();
+        }
+    }
+
+    private void TickQueue()
+    {
+        lock (gate)
+        {
+            if (disposed || queued == 0) return;
+            Update();
+            Drain();
+        }
+    }
+
+    private bool HasQueuedAtOrAbove(RequestPriority priority)
+    {
+        for (var tier = (int)priority; tier < queues.Length; tier++)
+            if (queues[tier].Count > 0) return true;
+        return false;
+    }
+
+    private void ExpireWaiters()
+    {
+        // Expire every tier, even when all execution slots remain occupied.
+        foreach (var queue in queues)
+        {
+            while (queue.First is { } node
+                && clock.GetElapsedTime(node.Value.Started).TotalMilliseconds >= settings.QueueTimeoutMs)
+            {
+                var waiter = node.Value;
+                Remove(waiter);
+                queueTimeouts++;
+                waiter.Completion.TrySetResult(Reject("Adaptive queue timeout", clock.GetElapsedTime(waiter.Started)));
+            }
+        }
+    }
+
+    private void Drain()
+    {
+        ExpireWaiters();
+        for (var tier = queues.Length - 1; tier >= 0; tier--)
+        {
+            while (queues[tier].First is { } node)
+            {
+                if (inflight >= Ceiling(node.Value.Priority)) return;
+                var waiter = node.Value;
+                Remove(waiter);
+                waiter.Completion.TrySetResult(Grant(waiter.Priority, waiter.Started));
+            }
+        }
+        if (queued == 0) queueTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+    }
+
+    public void Dispose()
+    {
+        lock (gate)
+        {
+            if (disposed) return;
+            disposed = true;
+            queueTimer?.Dispose();
+            foreach (var queue in queues)
+                while (queue.First is { } node)
+                {
+                    var waiter = node.Value;
+                    Remove(waiter);
+                    waiter.Completion.TrySetResult(Reject("Adaptive is stopping", clock.GetElapsedTime(waiter.Started)));
+                }
+        }
+    }
+
+    // Preview only; middleware uses AcquireAsync to reserve capacity or wait.
     public ValueTask<LoadSheddingDecision> DecideAsync(LoadSheddingContext context, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
-            Update();
+            if (!disposed) { Update(); Drain(); }
             return ValueTask.FromResult(Decision(context.Priority));
         }
     }
@@ -54,18 +213,19 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
         context.HttpContext.RequestAborted.ThrowIfCancellationRequested();
         lock (gate)
         {
+            if (disposed) { lease = null; return LoadSheddingDecision.Reject("Adaptive is stopping", retryAfterSeconds); }
             Update();
-            // Record rejected arrivals too, so borrowers yield newly freed slots.
+            ObserveDemand(context.Priority);
+            ExpireWaiters();
             var priorityIndex = (int)context.Priority;
-            lastDemand[priorityIndex] = clock.GetTimestamp();
-            demandSeen[priorityIndex] = true;
             var decision = Decision(context.Priority);
             lease = null;
-            if (!decision.IsAllowed) { saturated = true; return decision; }
+            if (!decision.IsAllowed) { saturated = true; Drain(); return decision; }
             inflight++;
             activeByPriority[priorityIndex]++;
             if (inflight >= Ceiling(context.Priority)) saturated = true;
             lease = new Lease(this, generation, context.Priority);
+            Drain();
             return decision;
         }
     }
@@ -87,13 +247,13 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
     {
         var now = clock.GetTimestamp();
         for (var index = (int)priority + 1; index < activeByPriority.Length; index++)
-            if (activeByPriority[index] > 0 || (demandSeen[index]
+            if (queues[index].Count > 0 || activeByPriority[index] > 0 || (demandSeen[index]
                 && clock.GetElapsedTime(lastDemand[index], now).TotalMilliseconds < settings.PriorityDemandWindowMs))
                 return true;
         return false;
     }
 
-    private LoadSheddingDecision Decision(RequestPriority priority) => inflight < Ceiling(priority)
+    private LoadSheddingDecision Decision(RequestPriority priority) => !disposed && !HasQueuedAtOrAbove(priority) && inflight < Ceiling(priority)
         ? LoadSheddingDecision.Allow("Adaptive capacity is available")
         : LoadSheddingDecision.Reject($"Adaptive limit: {inflight}/{limit} active; priority ceiling {Ceiling(priority)}", retryAfterSeconds);
 
@@ -104,7 +264,11 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
             inflight--;
             activeByPriority[(int)priority]--;
             // Requests admitted before a probe must not contaminate its reference measurement.
-            if (requestGeneration != generation || duration is null) return;
+            if (requestGeneration != generation || duration is null)
+            {
+                if (!disposed) { Update(); Drain(); }
+                return;
+            }
             completed++;
             if (!succeeded) failures++;
             else
@@ -113,7 +277,7 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
                 sampleIndex = (sampleIndex + 1) % samples.Length;
                 sampleCount = Math.Min(sampleCount + 1, samples.Length);
             }
-            Update();
+            if (!disposed) { Update(); Drain(); }
         }
     }
 
@@ -222,10 +386,19 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
     {
         lock (gate) return new(limit, inflight, referenceMs, sampleMs, probing)
         {
+            Queued = queued, QueueFull = queueFull, QueueTimeouts = queueTimeouts, QueueCancelled = queueCancelled,
             LatencyThresholdMs = LatencyThresholdMs, SlowWindows = slowWindows,
             WindowSamples = sampleCount, ReferenceWindows = referenceWindows.Count,
             LatencyBackoffs = latencyBackoffs, FailureBackoffs = failureBackoffs
         };
+    }
+
+    private sealed class Waiter(RequestPriority priority, long started)
+    {
+        public RequestPriority Priority { get; } = priority;
+        public long Started { get; } = started;
+        public LinkedListNode<Waiter>? Node { get; set; }
+        public TaskCompletionSource<RequestAdmission> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private sealed class Lease(AdaptiveLoadSheddingStrategy owner, int generation, RequestPriority priority) : IRequestExecutionLease
@@ -243,6 +416,10 @@ public sealed class AdaptiveLoadSheddingStrategy : IConcurrencyLoadSheddingStrat
 
 public sealed record AdaptiveLoadSnapshot(int Limit, int Inflight, double ReferenceLatencyMs, double SampleLatencyMs, bool Probing)
 {
+    public int Queued { get; init; }
+    public long QueueFull { get; init; }
+    public long QueueTimeouts { get; init; }
+    public long QueueCancelled { get; init; }
     public double LatencyThresholdMs { get; init; }
     public int SlowWindows { get; init; }
     public int WindowSamples { get; init; }

@@ -19,6 +19,7 @@ internal static class AdaptiveTests
 
     public static async Task RunAsync()
     {
+        await QueueChecks();
         await BorrowingChecks();
         await RobustLatencyChecks();
         var time = new ManualClock();
@@ -96,7 +97,8 @@ internal static class AdaptiveTests
             new() { PriorityDemandWindowMs = 0 }, new() { PriorityDemandWindowMs = 60001 },
             new() { ReferenceWindowCount = 0 }, new() { ConsecutiveSlowWindows = 0 },
             new() { MinLatencyIncreaseMs = double.NaN }, new() { ProbeMinSamples = 0 },
-            new() { ProbeMaxDurationMs = 1 }
+            new() { ProbeMaxDurationMs = 1 }, new() { QueueCapacity = -1 },
+            new() { QueueCapacity = 65537 }, new() { QueueTimeoutMs = 0 }
         }) Check(!invalid.IsValid(), "Invalid adaptive options accepted");
 
         var boundsClock = new ManualClock();
@@ -144,6 +146,175 @@ internal static class AdaptiveTests
 
         await MiddlewareChecks(options);
         Console.WriteLine("PASS: adaptive growth, backoff, failures, probes, priority reserves, atomic admission and middleware cleanup");
+    }
+
+    private static async Task QueueChecks()
+    {
+        SvalinnOptions Settings() => new() { Adaptive = new()
+        {
+            InitialLimit = 1, MaxLimit = 1, QueueCapacity = 3, QueueTimeoutMs = 100
+        }};
+        var clock = new ManualClock();
+        using (var strategy = new AdaptiveLoadSheddingStrategy(Options.Create(Settings()), clock))
+        {
+            var running = await strategy.AcquireAsync(Context(RequestPriority.Low), default);
+            var low1 = strategy.AcquireAsync(Context(RequestPriority.Low), default).AsTask();
+            var low2 = strategy.AcquireAsync(Context(RequestPriority.Low), default).AsTask();
+            var critical = strategy.AcquireAsync(Context(), default).AsTask();
+            Check(!(await strategy.AcquireAsync(Context(), default)).Decision.IsAllowed, "Bound queue capacity");
+            Check(strategy.Snapshot().Queued == 3, "Asynchronous waiting at limit");
+            Check(!strategy.TryAcquire(Context(), out _).IsAllowed, "Synchronous admission cannot bypass queue");
+            running.Lease!.Dispose();
+            var important = await critical.WaitAsync(TimeSpan.FromSeconds(2));
+            Check(!low1.IsCompleted && !low2.IsCompleted, "Critical must be scheduled before Low");
+            important.Lease!.Dispose();
+            var first = await low1.WaitAsync(TimeSpan.FromSeconds(2));
+            Check(!low2.IsCompleted, "FIFO within priority");
+            first.Lease!.Dispose(); first.Lease.Dispose();
+            (await low2.WaitAsync(TimeSpan.FromSeconds(2))).Lease!.Dispose();
+            Check(strategy.Snapshot().Inflight == 0 && strategy.Snapshot().Queued == 0, "Queue permits released once");
+
+            running = await strategy.AcquireAsync(Context(), default);
+            using var cancellation = new CancellationTokenSource();
+            var pending = strategy.AcquireAsync(Context(), cancellation.Token).AsTask();
+            cancellation.Cancel();
+            try { await pending; throw new Exception("Expected cancellation"); } catch (OperationCanceledException) { }
+            Check(strategy.Snapshot().QueueCancelled == 1 && strategy.Snapshot().Queued == 0, "Cancellation removes waiter");
+            var timeout = strategy.AcquireAsync(Context(), default).AsTask();
+            clock.Advance(101);
+            Check(!(await timeout.WaitAsync(TimeSpan.FromSeconds(2))).Decision.IsAllowed, "Queue deadline without completions");
+            Check(strategy.Snapshot().QueueTimeouts == 1 && strategy.Snapshot().Queued == 0, "Count timeout");
+            running.Lease!.Dispose();
+            running = await strategy.AcquireAsync(Context(), default);
+            var shutdown = strategy.AcquireAsync(Context(), default).AsTask();
+            strategy.Dispose();
+            Check(!(await shutdown).Decision.IsAllowed, "Shutdown drains queue");
+            running.Lease!.Dispose();
+            Check(!(await strategy.AcquireAsync(Context(), default)).Decision.IsAllowed, "No admission after disposal");
+        }
+        for (var i = 0; i < 100; i++)
+        {
+            using var strategy = new AdaptiveLoadSheddingStrategy(Options.Create(Settings()));
+            var running = await strategy.AcquireAsync(Context(), default);
+            using var cancellation = new CancellationTokenSource();
+            var pending = strategy.AcquireAsync(Context(), cancellation.Token).AsTask();
+            await Task.WhenAll(Task.Run(() => cancellation.Cancel()), Task.Run(() => running.Lease!.Dispose()));
+            try { (await pending.WaitAsync(TimeSpan.FromSeconds(2))).Lease?.Dispose(); } catch (OperationCanceledException) { }
+            Check(strategy.Snapshot().Inflight == 0 && strategy.Snapshot().Queued == 0, "Cancellation/grant race leaks no permits");
+        }
+        var disabled = Settings(); disabled.Adaptive.QueueCapacity = 0;
+        using (var strategy = new AdaptiveLoadSheddingStrategy(Options.Create(disabled)))
+        {
+            var running = await strategy.AcquireAsync(Context(), default);
+            Check(!(await strategy.AcquireAsync(Context(), default)).Decision.IsAllowed, "Zero capacity disables waiting");
+            running.Lease!.Dispose();
+        }
+        // Reserve expiry must wake pending requests without a new arrival or completion.
+        var reserved = Settings(); reserved.Adaptive.InitialLimit = reserved.Adaptive.MaxLimit = 4;
+        reserved.Adaptive.PriorityDemandWindowMs = 20;
+        using (var strategy = new AdaptiveLoadSheddingStrategy(Options.Create(reserved), clock))
+        {
+            var critical = await strategy.AcquireAsync(Context(), default);
+            critical.Lease!.Dispose();
+            var held = new List<IRequestExecutionLease>();
+            for (var i = 0; i < 3; i++) held.Add((await strategy.AcquireAsync(Context(RequestPriority.Normal), default)).Lease!);
+            var pending = strategy.AcquireAsync(Context(RequestPriority.Normal), default).AsTask();
+            Check(!pending.IsCompleted, "Recent Critical demand retains reserve");
+            clock.Advance(21);
+            (await pending.WaitAsync(TimeSpan.FromSeconds(2))).Lease!.Dispose();
+            foreach (var lease in held) lease.Dispose();
+        }
+        // A full queue of reserve-blocked Low requests must not deny a free slot to Critical.
+        foreach (var synchronous in new[] { false, true })
+        {
+            var settings = Settings();
+            settings.Adaptive.InitialLimit = settings.Adaptive.MaxLimit = 4;
+            settings.Adaptive.QueueCapacity = 4;
+            var time = new ManualClock();
+            using var strategy = new AdaptiveLoadSheddingStrategy(Options.Create(settings), time);
+            var first = await strategy.AcquireAsync(Context(), default);
+            first.Lease!.Dispose();
+            var lowRunning = new List<IRequestExecutionLease>();
+            for (var i = 0; i < 2; i++) lowRunning.Add((await strategy.AcquireAsync(Context(RequestPriority.Low), default)).Lease!);
+            var waiting = Enumerable.Range(0, 4).Select(_ => strategy.AcquireAsync(Context(RequestPriority.Low), default).AsTask()).ToArray();
+            Check(strategy.Snapshot().Queued == 4 && strategy.Snapshot().Inflight == 2, "Low queue must be blocked by reserved capacity");
+            IRequestExecutionLease? important;
+            if (synchronous)
+                Check(strategy.TryAcquire(Context(), out important).IsAllowed, "Critical synchronous admission uses its free reserve despite full Low queue");
+            else
+            {
+                var admission = await strategy.AcquireAsync(Context(), default);
+                Check(admission.Decision.IsAllowed, "Critical async admission uses its free reserve despite full Low queue");
+                important = admission.Lease;
+            }
+            Check(strategy.Snapshot().Inflight == 3 && strategy.Snapshot().Queued == 4 && waiting.All(task => !task.IsCompleted),
+                "Higher-priority admission preserves Low queue and execution bound");
+            important!.Dispose();
+            foreach (var lease in lowRunning) lease.Dispose();
+            foreach (var task in waiting) (await task.WaitAsync(TimeSpan.FromSeconds(2))).Lease?.Dispose();
+            Check(strategy.Snapshot().Inflight == 0, "Full Low queue cleanup");
+        }
+        var ordering = Settings(); ordering.Adaptive.QueueCapacity = 4;
+        using (var strategy = new AdaptiveLoadSheddingStrategy(Options.Create(ordering), new ManualClock()))
+        {
+            var running = await strategy.AcquireAsync(Context(), default);
+            var waiting = new Dictionary<RequestPriority, Task<RequestAdmission>>();
+            foreach (var priority in new[] { RequestPriority.Low, RequestPriority.Normal, RequestPriority.High, RequestPriority.Critical })
+                waiting[priority] = strategy.AcquireAsync(Context(priority), default).AsTask();
+            running.Lease!.Dispose();
+            foreach (var priority in new[] { RequestPriority.Critical, RequestPriority.High, RequestPriority.Normal, RequestPriority.Low })
+            {
+                var admission = await waiting[priority].WaitAsync(TimeSpan.FromSeconds(2));
+                Check(waiting.Where(pair => pair.Key < priority).All(pair => !pair.Value.IsCompleted), "All four priority tiers must be ordered");
+                admission.Lease!.Dispose();
+            }
+        }
+        // A probe lowering the limit must hold waiters; its end wakes them without arrivals.
+        var probing = Settings(); probing.Adaptive.InitialLimit = probing.Adaptive.MaxLimit = 4;
+        var probeClock = new ManualClock();
+        using (var strategy = new AdaptiveLoadSheddingStrategy(Options.Create(probing), probeClock))
+        {
+            probing.Adaptive.QueueTimeoutMs = 10000;
+            var held = new List<IRequestExecutionLease>();
+            for (var i = 0; i < 4; i++) held.Add((await strategy.AcquireAsync(Context(), default)).Lease!);
+            var waiting = strategy.AcquireAsync(Context(), default).AsTask();
+            probeClock.Advance(60001);
+            // The old waiter expires; enqueue a fresh waiter during the probe.
+            Check(!(await waiting).Decision.IsAllowed, "Expired waiter cannot acquire during probe");
+            waiting = strategy.AcquireAsync(Context(), default).AsTask();
+            for (var i = 0; i < 3; i++) held[i].Dispose();
+            Check(!waiting.IsCompleted && strategy.Snapshot().Limit == 1, "Probe respects reduced limit with older active requests");
+            probeClock.Advance(2001);
+            (await waiting.WaitAsync(TimeSpan.FromSeconds(2))).Lease!.Dispose();
+            held[3].Dispose();
+            Check(strategy.Snapshot().Limit == 4 && strategy.Snapshot().Inflight == 0, "Probe restoration wakes queued requests");
+        }
+        var latencyOptions = Settings(); latencyOptions.Adaptive.MinSamples = 1;
+        latencyOptions.Adaptive.ReferenceWindowCount = 1; latencyOptions.Adaptive.UpdateIntervalMs = 10;
+        var latencyClock = new ManualClock();
+        using (var strategy = new AdaptiveLoadSheddingStrategy(Options.Create(latencyOptions), latencyClock))
+        {
+            var running = await strategy.AcquireAsync(Context(), default);
+            var invoked = false;
+            var middleware = new SvalinnMiddleware(_ => { invoked = true; latencyClock.Advance(10); return Task.CompletedTask; },
+                new Resolver(), new SystemStateAggregator([]), strategy, new InflightRequestCounter(), [],
+                Options.Create(latencyOptions), latencyClock);
+            var context = new DefaultHttpContext();
+            var waiting = middleware.InvokeAsync(context);
+            latencyClock.Advance(80);
+            Check(!invoked, "Queued middleware must not run handler before grant");
+            running.Lease!.Dispose();
+            await waiting.WaitAsync(TimeSpan.FromSeconds(2));
+            Check(invoked && strategy.Snapshot().ReferenceLatencyMs == 10, "AIMD samples handler duration excluding queue wait");
+            running = await strategy.AcquireAsync(Context(), default);
+            context = new DefaultHttpContext();
+            waiting = middleware.InvokeAsync(context);
+            latencyClock.Advance(101);
+            await waiting.WaitAsync(TimeSpan.FromSeconds(2));
+            Check(context.Response.StatusCode == 503 && context.Response.Headers.RetryAfter == "5", "Adaptive middleware queue timeout returns 503 and Retry-After");
+            running.Lease!.Dispose();
+        }
+        Console.WriteLine("PASS: Adaptive queue priorities, FIFO, bounds, timeout, cancellation races, reserve expiry and shutdown");
     }
 
     private static async Task RobustLatencyChecks()
@@ -299,9 +470,38 @@ internal static class AdaptiveTests
     private sealed class ManualClock : TimeProvider
     {
         private long ticks;
+        private readonly List<ManualTimer> timers = new();
         public override long TimestampFrequency => 1000;
         public override long GetTimestamp() => ticks;
-        public void Advance(int milliseconds) => ticks += milliseconds;
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new ManualTimer(this, callback, state); timers.Add(timer); timer.Change(dueTime, period); return timer;
+        }
+        public void Advance(int milliseconds)
+        {
+            ticks += milliseconds;
+            foreach (var timer in timers.ToArray()) timer.Fire(ticks);
+        }
+        private sealed class ManualTimer(ManualClock clock, TimerCallback callback, object? state) : ITimer
+        {
+            private long due = long.MaxValue;
+            private TimeSpan period;
+            private bool disposed;
+            public bool Change(TimeSpan dueTime, TimeSpan repeat)
+            {
+                if (disposed) return false;
+                due = dueTime == Timeout.InfiniteTimeSpan ? long.MaxValue : clock.ticks + (long)dueTime.TotalMilliseconds;
+                period = repeat; return true;
+            }
+            public void Fire(long now)
+            {
+                if (disposed || due > now) return;
+                due = period == Timeout.InfiniteTimeSpan ? long.MaxValue : now + (long)period.TotalMilliseconds;
+                callback(state);
+            }
+            public void Dispose() { disposed = true; clock.timers.Remove(this); }
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
     }
     private sealed class Resolver : IPriorityResolver
     {

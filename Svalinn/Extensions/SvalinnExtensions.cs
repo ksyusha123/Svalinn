@@ -96,6 +96,10 @@ public static class SvalinnExtensions
                 {
                     ["adaptive_limit"] = snapshot.Limit,
                     ["adaptive_inflight"] = snapshot.Inflight,
+                    ["adaptive_queued"] = snapshot.Queued,
+                    ["adaptive_queue_full_total"] = snapshot.QueueFull,
+                    ["adaptive_queue_timeout_total"] = snapshot.QueueTimeouts,
+                    ["adaptive_queue_cancelled_total"] = snapshot.QueueCancelled,
                     ["adaptive_reference_latency_ms"] = snapshot.ReferenceLatencyMs,
                     ["adaptive_sample_latency_ms"] = snapshot.SampleLatencyMs,
                     ["adaptive_probing"] = snapshot.Probing ? 1 : 0,
