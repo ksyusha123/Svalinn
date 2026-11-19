@@ -1,0 +1,10 @@
+{
+  "as_of": "2026-11-18",
+  "normal_rows": 12,
+  "priority_rows": 32,
+  "checks": {
+    "csharp": "PASS four groups",
+    "python": "35 tests OK project venv"
+  },
+  "notes": "Current series are kept separate from historical versions. Latency target and success ratio are separate criteria."
+}
