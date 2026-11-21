@@ -35,7 +35,7 @@ public sealed class CinnamonLoadSheddingStrategy : BackgroundService, IAsyncLoad
     private static int AvailableProcessors()
     {
         var count = Environment.ProcessorCount;
-        if (OperatingSystem.IsWindows())
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
         {
             using var process = Process.GetCurrentProcess();
             count = Math.Min(count, BitOperations.PopCount(unchecked((ulong)process.ProcessorAffinity.ToInt64())));

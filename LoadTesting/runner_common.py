@@ -1,4 +1,4 @@
-"""Shared Windows process and artifact support for the Git Bash runners."""
+"""Shared Windows/Linux process and artifact support."""
 
 import contextlib
 import hashlib
@@ -111,8 +111,8 @@ def cpus(mask):
 
 
 def check_masks(server, generator=None):
-    if os.name != "nt":
-        raise RuntimeError("Этот runner предназначен для Git Bash в Windows.")
+    if os.name != "nt" and not sys.platform.startswith("linux"):
+        raise RuntimeError("Этот runner поддерживает Windows и Linux.")
     available = set(psutil.Process().cpu_affinity())
     if len(cpus(server)) != 1 or not set(cpus(server)) <= available:
         raise ValueError("Маска сервера должна выбирать один доступный логический CPU.")
@@ -132,16 +132,22 @@ def ensure_port_free(port):
 
 @contextlib.contextmanager
 def directory_lock(directory):
-    import msvcrt
-
     path = Path(directory) / "running.lock"
     with path.open("a+b") as stream:
         if path.stat().st_size == 0:
             stream.write(b"0")
             stream.flush()
         stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            acquire = lambda: msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            release = lambda: msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            acquire = lambda: fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            release = lambda: fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
         try:
-            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            acquire()
         except OSError as error:
             raise RuntimeError(
                 f"Каталог уже используется другим запуском: {directory}"
@@ -150,7 +156,7 @@ def directory_lock(directory):
             yield
         finally:
             stream.seek(0)
-            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            release()
 
 
 class Child:
@@ -162,8 +168,12 @@ class Child:
                 (Path(directory) / (name + suffix)).open("wb")
                 for suffix in (".log", ".err")
             ]
+            launch = [str(a) for a in args]
+            if affinity is not None and sys.platform.startswith("linux"):
+                # Pin before exec so .NET and all k6 worker threads inherit the mask.
+                launch = [executable("taskset"), "--cpu-list", ",".join(map(str, cpus(affinity))), *launch]
             self.process = subprocess.Popen(
-                [str(a) for a in args],
+                launch,
                 cwd=cwd,
                 env=env,
                 stdout=self.logs[0],

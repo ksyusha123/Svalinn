@@ -7,7 +7,7 @@ public sealed class CpuLoadOptions
     public double OverloadThresholdPercent { get; set; } = 90;
     public double RecoveryThresholdPercent { get; set; } = 75;
     // CPU capacity available to this process; fractions support fractional quotas.
-    // Null uses Environment.ProcessorCount, capped by Windows process affinity.
+    // Null uses Environment.ProcessorCount, capped by Windows/Linux process affinity.
     public double? ProcessorCapacity { get; set; }
 
     internal bool IsValid() => SampleIntervalMs is >= 50 and <= 60_000

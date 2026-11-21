@@ -9,10 +9,17 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import run_experiment as runner
-from runner_common import Child, directory_lock, read_json, sha256, write_json
+from runner_common import Child, directory_lock, read_json, sha256, write_json, check_masks
 
 
 class ValidationTests(unittest.TestCase):
+    def test_linux_two_cpu_masks(self):
+        with patch('runner_common.os.name', 'posix'), patch('runner_common.sys.platform', 'linux'), patch('runner_common.psutil.Process') as process:
+            process.return_value.cpu_affinity.return_value = [0, 1]
+            check_masks(1, 2)
+            for server, generator in ((1,4),(1,1),(3,2)):
+                with self.assertRaises(ValueError): check_masks(server,generator)
+
     def parse(self, *args):
         with patch.object(runner, "check_masks"):
             return runner.validate(runner.parser().parse_args(args))
@@ -159,7 +166,6 @@ class ArtifactTests(unittest.TestCase):
             read_json(self.path / "source-hashes.json")[0]["Path"], "source.txt"
         )
 
-    @unittest.skipUnless(sys.platform == "win32", "Windows locking")
     def test_lock_prevents_concurrent_writers_and_releases(self):
         with (
             directory_lock(self.path),

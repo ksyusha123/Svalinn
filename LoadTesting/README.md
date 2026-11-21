@@ -5,6 +5,11 @@
 один CPU и общий ограниченный I/O-пул. [Устройство TestApp](../TestApp/README.md),
 [Adaptive](../Svalinn/ADAPTIVE.md), [Cinnamon](../Svalinn/CINNAMON.md).
 
+Для удалённой Ubuntu 24.04 (Intel, 2 vCPU, 2 GiB RAM) используйте
+[отдельную инструкцию](ubuntu/README.md): установка .NET 10/k6/Python,
+сборка без корпоративного NuGet, smoke, OFF-калибровка и полная матрица
+с Cpu/Mixed и двумя вариантами Adaptive. Ниже описана прежняя сокращённая матрица.
+
 ## Подготовка
 
 Нужны Windows, .NET SDK 10, k6 в PATH, uv и Python 3.14+.

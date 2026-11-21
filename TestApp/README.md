@@ -10,8 +10,9 @@
 
 ## Быстрый запуск
 
-Нужен .NET SDK 10. Для CPU/I/O-режима нужна Windows: приложение использует
-`ProcessorAffinity`. 
+Нужен .NET SDK 10. CPU/I/O-режим поддерживает Windows и Linux и использует
+`ProcessorAffinity`. Для Ubuntu 24.04 с 2 vCPU / 2 GiB RAM подготовлены
+[установка и запуск исследования](../LoadTesting/ubuntu/README.md).
 
 Сборка и запуск delay-стенда без необязательных OpenAPI/Scalar:
 

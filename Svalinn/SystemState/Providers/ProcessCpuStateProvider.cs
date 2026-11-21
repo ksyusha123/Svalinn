@@ -18,7 +18,7 @@ public sealed class ProcessCpuStateProvider(IOptions<SvalinnOptions> options) : 
         if (settings.Strategy != LoadSheddingStrategyKind.Cpu) return;
         using var process = Process.GetCurrentProcess();
         var capacity = settings.Cpu.ProcessorCapacity ?? Environment.ProcessorCount;
-        if (settings.Cpu.ProcessorCapacity is null && OperatingSystem.IsWindows())
+        if (settings.Cpu.ProcessorCapacity is null && (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()))
             capacity = Math.Min(capacity, BitOperations.PopCount(unchecked((ulong)process.ProcessorAffinity.ToInt64())));
         if (capacity <= 0) throw new InvalidOperationException("Available CPU capacity must be positive.");
         var tracker = new CpuLoadTracker(settings.Cpu, capacity);

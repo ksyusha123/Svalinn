@@ -1,4 +1,4 @@
-"""Run paired OFF/ON load experiments on Windows, including from Git Bash."""
+"""Run paired OFF/ON load experiments on Windows and Linux."""
 
 import argparse
 import csv
@@ -317,18 +317,7 @@ def settings(a):
         k6Version=command([executable("k6"), "version"], True).splitlines()[0],
         binarySha256=sha256(DLL),
         processorDescription=os.environ.get("PROCESSOR_IDENTIFIER", ""),
-        baseCommit=command(
-            [
-                "git",
-                "-c",
-                f"safe.directory={ROOT.as_posix()}",
-                "-C",
-                ROOT,
-                "rev-parse",
-                "HEAD",
-            ],
-            True,
-        ).strip(),
+        baseCommit=source_revision(),
     )
     if a.scenario == "SuccessDisaster":
         values.update(
@@ -343,6 +332,14 @@ def settings(a):
     values["phasePlans"] = {str(load): phases(a, load) for load in values["loadLevels"]}
     values["modes"] = a.modes
     return values
+
+
+def source_revision():
+    # A transferred source archive need not contain .git; hashes still identify sources.
+    if not (ROOT / ".git").exists():
+        return "source-archive"
+    return command(["git", "-c", f"safe.directory={ROOT.as_posix()}",
+                    "-C", ROOT, "rev-parse", "HEAD"], True).strip()
 
 
 def source_files():
@@ -373,6 +370,8 @@ def source_files():
         if p.suffix in (".cs", ".csproj")
         and not {"bin", "obj"} & set(p.relative_to(ROOT).parts)
     ]
+    paths += [p.relative_to(ROOT).as_posix() for p in (LOAD_TESTING / 'ubuntu').glob('*')
+              if p.is_file() and p.suffix in ('.py', '.sh', '.config', '.md')]
     return sorted(paths)
 
 
@@ -486,7 +485,7 @@ def start_server(a, enabled, name):
         a.output_directory,
         name + ".server",
         ROOT / "TestApp",
-        a.server_affinity_mask if a.workload == "Delay" else None,
+        a.server_affinity_mask,
     )
 
     def probe():
@@ -728,8 +727,10 @@ def run_one(a, current, repetition, load, mode, name, prefix):
                 # A short run can exit between polling and reading its process counters.
                 try:
                     generator_cpu = generator.cpu_time()
+                    generator_rss = generator.stats.memory_info().rss
                 except psutil.NoSuchProcess:
                     generator_cpu = last_generator_cpu
+                    generator_rss = None
                 samples.append(
                     {
                         "elapsedSeconds": now,
@@ -738,6 +739,7 @@ def run_one(a, current, repetition, load, mode, name, prefix):
                         * (cpu - last_cpu)
                         / (now - last_time),
                         "serverWorkingSetBytes": server.stats.memory_info().rss,
+                        "generatorWorkingSetBytes": generator_rss,
                         "serverThreads": server.stats.num_threads(),
                         "generatorCpuPercentOfOneLogicalProcessor": 100
                         * (generator_cpu - last_generator_cpu)

@@ -2,6 +2,9 @@
 set -euo pipefail
 load_testing="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 python="$load_testing/plotting/.venv/Scripts/python.exe"
+if [[ "$(uname -s)" == "Linux" ]]; then
+  python="$load_testing/plotting/.venv/bin/python"
+fi
 if [[ ! -x "$python" ]]; then
   echo "Нет Python-окружения. Выполните: uv sync --project LoadTesting/plotting --locked --no-install-project" >&2
   exit 1

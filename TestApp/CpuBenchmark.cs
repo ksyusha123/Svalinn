@@ -17,11 +17,11 @@ internal sealed class CpuBenchmark(int iterations, int minWorkerThreads)
         var affinity = section.GetValue<long>("AffinityMask", 0);
         if (iterations is < 1_000 or > 10_000_000 || workers is < 1 or > 256 || affinity <= 0)
             throw new InvalidOperationException("Для CPU-эксперимента нужны Iterations от 1000 до 10000000, MinWorkerThreads от 1 до 256 и положительная AffinityMask.");
-        if (!OperatingSystem.IsWindows())
-            throw new PlatformNotSupportedException("Первый вариант стенда использует привязку к процессорам Windows.");
-
         using var process = Process.GetCurrentProcess();
-        process.ProcessorAffinity = (nint)affinity;
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
+            process.ProcessorAffinity = (nint)affinity;
+        else
+            throw new PlatformNotSupportedException("Ресурсный стенд поддерживает Windows и Linux.");
         ThreadPool.GetMinThreads(out _, out var completionPortThreads);
         if (!ThreadPool.SetMinThreads(workers, completionPortThreads))
             throw new InvalidOperationException("Не удалось настроить рабочие потоки стенда.");
@@ -36,7 +36,7 @@ internal sealed class CpuBenchmark(int iterations, int minWorkerThreads)
             return Results.Ok(new
             {
                 iterations, minWorkerThreads,
-                affinityMask = OperatingSystem.IsWindows() ? process.ProcessorAffinity.ToInt64() : 0,
+                affinityMask = OperatingSystem.IsWindows() || OperatingSystem.IsLinux() ? process.ProcessorAffinity.ToInt64() : 0,
                 algorithm = "PBKDF2-SHA256, результат 32 байта, одинаковые входные данные и объём работы для всех приоритетов",
                 processId = process.Id
             });
