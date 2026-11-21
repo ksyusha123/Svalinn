@@ -45,7 +45,7 @@ k6 из официального репозитория Grafana, uv, Python 3.14
 Не запускайте установщик и тесты от root.
 
 `prepare` восстанавливает NuGet-пакеты из nuget.org с отдельным
-`LoadTesting/ubuntu/nuget-public.config`, собирает Release без OpenAPI/Scalar одним
+`LoadTesting/ubuntu/nuget-public.config`, собирает Release одним
 MSBuild worker, завершает build servers, проверяет построение PNG-графика
 и запускает функциональные тесты C# и Python.
 Корпоративный NuGet.Config, если он остался при ручном копировании, не используется

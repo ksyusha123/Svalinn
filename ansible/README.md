@@ -1,7 +1,9 @@
 # Настройка зависимостей
 
-`playbook.yml` устанавливает `dotnet-sdk-10.0`
-на существующую Ubuntu 24.04 через SSH. 
+`playbook.yml` устанавливает .NET SDK 10, k6, uv и Python 3.14
+на существующую Ubuntu 24.04 через SSH. Также устанавливаются системный Python,
+venv, GnuPG, Git, unzip и tmux. Python 3.14 устанавливается через uv для
+SSH-пользователя; системный Python остаётся доступен Ansible.
 
 В `inventory.ini` указан адрес `153.51.118.242` из Terraform. SSH-пользователь
 задаётся через переменную окружения `SVALINN_SSH_USER` (значение `ssh_user`
@@ -71,7 +73,18 @@ ansible -i inventory.ini svalinn -m ansible.builtin.ping --private-key ~/.ssh/sv
 ansible-playbook -i inventory.ini playbook.yml --private-key ~/.ssh/svalinn
 ```
 
-Последняя команда устанавливает SDK через sudo и выводит установленные версии SDK.
+Последняя команда устанавливает инструменты и выводит версии .NET SDK, k6 и Python.
+Для k6 используется официальный APT-репозиторий Grafana, для uv — установщик Astral.
+После переноса проекта на ВМ установите Python-зависимости и соберите приложение
+от обычного SSH-пользователя, из корня проекта:
+
+```bash
+bash LoadTesting/ubuntu/run.sh prepare
+```
+
+Команда создаёт окружение Python через `uv sync --locked` и запускает проверки.
+Повторно запускать `LoadTesting/ubuntu/install.sh` после Ansible не требуется.
+
 Playbook можно запускать повторно: установленные пакеты повторно не устанавливаются.
 Используется `state: present`: новые patch-версии уже установленных пакетов
 этот playbook принудительно не обновляет. Точные версии пакетов не закреплены;
@@ -91,12 +104,16 @@ ansible-playbook -i inventory.ini playbook.yml --private-key ~/.ssh/svalinn
 
 ```bash
 dotnet --list-sdks
+k6 version
+uv run --no-project --python 3.14 python --version
 ```
 
 В выводе должен присутствовать SDK `10.0.x`.
-Пересоздавать ВМ или выполнять `terraform apply` для установки .NET не нужно.
+Пересоздавать ВМ или выполнять `terraform apply` для установки зависимостей не нужно.
 
 ## Источники
 
 - [Установка .NET на Ubuntu 24.04](https://learn.microsoft.com/en-us/dotnet/core/install/linux-ubuntu-install#ubuntu-2404)
 - [Установка Ansible и требования к контроллеру](https://docs.ansible.com/projects/ansible/latest/installation_guide/intro_installation.html)
+- [Установка k6](https://grafana.com/docs/k6/latest/set-up/install-k6/)
+- [Установщик uv](https://docs.astral.sh/uv/reference/installer/)

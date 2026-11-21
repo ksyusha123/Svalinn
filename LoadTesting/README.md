@@ -17,7 +17,7 @@
 
 ```bash
 uv sync --project LoadTesting/plotting --locked --no-install-project
-dotnet build TestApp/TestApp.csproj -c Release -p:IncludeApiDocs=false
+dotnet build TestApp/TestApp.csproj -c Release
 ```
 
 Сервер запускает runner. CPU сервера закрепляется за логическим процессором 0,

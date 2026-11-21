@@ -11,9 +11,9 @@ if [[ $# -gt 0 ]]; then shift; fi
 python="$repo/LoadTesting/plotting/.venv/bin/python"
 if [[ "$stage" == prepare ]]; then
   uv sync --project LoadTesting/plotting --python 3.14 --locked --no-install-project
-  dotnet restore TestApp/TestApp.csproj --configfile LoadTesting/ubuntu/nuget-public.config -p:IncludeApiDocs=false --disable-parallel
+  dotnet restore TestApp/TestApp.csproj --configfile LoadTesting/ubuntu/nuget-public.config --disable-parallel
   dotnet restore Svalinn.Tests/Svalinn.Tests.csproj --configfile LoadTesting/ubuntu/nuget-public.config --disable-parallel
-  dotnet build TestApp/TestApp.csproj -c Release --no-restore -m:1 -p:IncludeApiDocs=false
+  dotnet build TestApp/TestApp.csproj -c Release --no-restore -m:1
   dotnet build Svalinn.Tests/Svalinn.Tests.csproj -c Release --no-restore -m:1
   dotnet build-server shutdown
   "$python" -c 'import io; import matplotlib.pyplot as plt; fig, ax = plt.subplots(); ax.plot([0, 1], [0, 1]); fig.savefig(io.BytesIO(), format="png"); plt.close(fig); print("PNG rendering: OK")'

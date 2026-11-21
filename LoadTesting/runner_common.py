@@ -74,7 +74,6 @@ def build(no_restore=False):
         ROOT / "TestApp/TestApp.csproj",
         "-c",
         "Release",
-        "-p:IncludeApiDocs=false",
     ]
     if no_restore:
         args.append("--no-restore")

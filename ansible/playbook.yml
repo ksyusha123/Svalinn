@@ -1,17 +1,106 @@
 ---
-- name: Install .NET SDK 10 on the Svalinn VM
+- name: Install Svalinn benchmark dependencies
   hosts: svalinn
   become: true
   gather_facts: false
 
   tasks:
-    - name: Install .NET SDK 10
+    - name: Install .NET SDK 10 and system tools
       ansible.builtin.apt:
-        name: dotnet-sdk-10.0
+        name:
+          - dotnet-sdk-10.0
+          - python3
+          - python3-venv
+          - python3-apt
+          - ca-certificates
+          - gnupg
+          - git
+          - unzip
+          - tmux
+          - util-linux
         state: present
         update_cache: true
         cache_valid_time: 3600
         lock_timeout: 180
+
+    - name: Create APT keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download k6 repository signing key
+      ansible.builtin.get_url:
+        url: https://dl.k6.io/key.gpg
+        dest: /etc/apt/keyrings/svalinn-k6.asc
+        mode: '0644'
+      register: k6_key
+
+    - name: Check k6 binary keyring
+      ansible.builtin.stat:
+        path: /etc/apt/keyrings/svalinn-k6.gpg
+      register: k6_keyring
+
+    - name: Convert k6 signing key
+      ansible.builtin.command:
+        argv:
+          - gpg
+          - --batch
+          - --yes
+          - --dearmor
+          - -o
+          - /etc/apt/keyrings/svalinn-k6.gpg
+          - /etc/apt/keyrings/svalinn-k6.asc
+      when: k6_key.changed or not k6_keyring.stat.exists
+      changed_when: true
+
+    - name: Enable official k6 repository
+      ansible.builtin.apt_repository:
+        repo: deb [signed-by=/etc/apt/keyrings/svalinn-k6.gpg] https://dl.k6.io/deb stable main
+        filename: k6
+        state: present
+
+    - name: Install k6
+      ansible.builtin.apt:
+        name: k6
+        state: present
+        lock_timeout: 180
+
+    - name: Download uv installer
+      ansible.builtin.get_url:
+        url: https://astral.sh/uv/install.sh
+        dest: /var/tmp/svalinn-uv-install.sh
+        mode: '0644'
+
+    - name: Install uv for all users
+      ansible.builtin.command:
+        argv: [sh, /var/tmp/svalinn-uv-install.sh]
+        creates: /usr/local/bin/uv
+      environment:
+        UV_UNMANAGED_INSTALL: /usr/local/bin
+
+    - name: Install Python 3.14 for SSH user
+      become: false
+      ansible.builtin.command:
+        argv: [/usr/local/bin/uv, python, install, '3.14']
+      register: python_install
+      when: not ansible_check_mode
+      changed_when: "'Installed Python' in python_install.stderr"
+
+    - name: Check k6 version
+      ansible.builtin.command:
+        argv: [k6, version]
+      register: k6_version
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Check managed Python version
+      become: false
+      ansible.builtin.command:
+        argv: [/usr/local/bin/uv, run, --no-project, --python, '3.14', python, --version]
+      register: python_version
+      changed_when: false
+      when: not ansible_check_mode
 
     - name: List installed SDKs
       ansible.builtin.command: dotnet --list-sdks
@@ -27,8 +116,10 @@
         success_msg: .NET SDK 10 is installed.
       when: not ansible_check_mode
 
-    - name: Show installed SDK versions
+    - name: Show installed tool versions
       ansible.builtin.debug:
         msg:
           sdks: "{{ dotnet_sdks.stdout_lines }}"
+          k6: "{{ k6_version.stdout }}"
+          python: "{{ python_version.stdout }}"
       when: not ansible_check_mode

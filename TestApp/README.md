@@ -14,10 +14,10 @@
 `ProcessorAffinity`. Для Ubuntu 24.04 с 2 vCPU / 2 GiB RAM подготовлены
 [установка и запуск исследования](../LoadTesting/ubuntu/README.md).
 
-Сборка и запуск delay-стенда без необязательных OpenAPI/Scalar:
+Сборка и запуск delay-стенда:
 
 ```powershell
-dotnet build TestApp/TestApp.csproj -c Release -p:IncludeApiDocs=false
+dotnet build TestApp/TestApp.csproj -c Release
 dotnet run --project TestApp -c Release --no-build --no-launch-profile -- --urls http://127.0.0.1:5025
 ```
 
@@ -29,16 +29,6 @@ dotnet run --project TestApp -c Release --no-build --no-launch-profile -- --urls
 ```powershell
 dotnet run --project TestApp -c Release --no-build --no-launch-profile -- --urls http://127.0.0.1:5025 --Svalinn:Enabled=false
 ```
-
-Для интерфейса документации выполните обычный запуск со сборкой:
-
-```powershell
-dotnet run --project TestApp --launch-profile http
-```
-
-При `IncludeApiDocs=true` (значение по умолчанию) в Development доступны
-`/scalar/v1` и `/openapi/v1.json`. Эти зависимости нужно восстановить через NuGet.
-Запуск с `--no-build` использует уже собранный вариант приложения.
 
 ## Устройство
 
