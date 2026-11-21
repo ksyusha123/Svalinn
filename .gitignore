@@ -13,3 +13,17 @@ __pycache__/
 .venv/
 
 .ruff_cache/
+
+# Terraform local state, providers, plans, and credentials
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/*.tfvars
+terraform/*.tfvars.json
+terraform/crash.log
+terraform/crash.*.log
+
+# Generated trace probe binaries with local build paths
+/.test-tmp/TraceDecoder/TraceProbe.dll
+/.test-tmp/TraceDecoder/TraceProbe.pdb

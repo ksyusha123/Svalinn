@@ -3,9 +3,6 @@ name = "loadtesting"
 version = "0.1.0"
 description = "Add your description here"
 readme = "../README.md"
-authors = [
-    { name = "Kseniia Astakhova", email = "k.astakhova@skbkontur.ru" }
-]
 requires-python = ">=3.14"
 dependencies = [
     "matplotlib>=3.11.2",
