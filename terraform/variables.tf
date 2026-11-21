@@ -1,3 +1,15 @@
+variable "folder_id" {
+  description = "Yandex Cloud folder ID. Set in secrets.auto.tfvars or TF_VAR_folder_id."
+  type        = string
+  sensitive   = true
+}
+
+variable "subnet_id" {
+  description = "Existing subnet ID. Set in secrets.auto.tfvars or TF_VAR_subnet_id."
+  type        = string
+  sensitive   = true
+}
+
 variable "ssh_public_key" {
   description = "Public SSH key. Set in secrets.auto.tfvars or TF_VAR_ssh_public_key."
   type        = string

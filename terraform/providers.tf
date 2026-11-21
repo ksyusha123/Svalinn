@@ -10,6 +10,6 @@ terraform {
 }
 
 provider "yandex" {
-  folder_id = "b1g1m90mm920k570odpp"
+  folder_id = var.folder_id
   zone      = "ru-central1-e"
 }

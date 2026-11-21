@@ -1,7 +1,7 @@
 resource "yandex_compute_instance" "svalinn" {
   name               = "svalinn"
   hostname           = "svalinn"
-  folder_id          = "b1g1m90mm920k570odpp"
+  folder_id          = var.folder_id
   zone               = "ru-central1-e"
   platform_id        = "standard-v3"
   maintenance_policy = "unspecified"
@@ -27,7 +27,7 @@ resource "yandex_compute_instance" "svalinn" {
   }
 
   network_interface {
-    subnet_id = "ajcr3der5jfv8j91ae3e"
+    subnet_id = var.subnet_id
     index     = 0
     nat       = true
   }

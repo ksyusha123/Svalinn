@@ -2,7 +2,7 @@
 
 Конфигурация создаёт ВМ Ubuntu 24.04: 2 vCPU, 2 ГБ RAM, SSD 10 ГБ,
 публичный IPv4 и пользователя из переменной `ssh_user` с указанным SSH-ключом.
-Используется существующая подсеть `ajcr3der5jfv8j91ae3e` (`default-ru-central1-e`)
+Используется существующая подсеть из переменной `subnet_id`
 в зоне `ru-central1-e`.
 
 ## Подготовка
@@ -10,33 +10,35 @@
 Установите [Terraform](https://developer.hashicorp.com/terraform/install)
 версии 1.5 или новее и [Yandex Cloud CLI](https://yandex.cloud/ru/docs/cli/quickstart).
 Если профиль CLI ещё не настроен, выполните `yc init` под учётной записью
-с правами на создание ВМ в каталоге `b1g1m90mm920k570odpp` и использование подсети.
+с правами на создание ВМ в каталоге из `folder_id` и использование подсети.
 
 ## Создание ВМ (PowerShell)
 
 Перед запуском создайте локальный файл `terraform/secrets.auto.tfvars`:
 
 ```hcl
+folder_id      = "<ID каталога Yandex Cloud>"
+subnet_id      = "<ID существующей подсети>"
 ssh_public_key = "<публичный SSH-ключ>"
 ssh_user       = "<SSH-пользователь>"
 ```
 
 Terraform автоматически загружает этот файл; он исключён из Git правилом
-`terraform/*.tfvars`. Обе переменные помечены `sensitive`, чтобы скрывать ключ и имя пользователя
-в выводе Terraform. Вместо файла можно передать ключ через переменную окружения
-`TF_VAR_ssh_public_key` и `TF_VAR_ssh_user` из хранилища секретов.
+`terraform/*.tfvars`. Все четыре переменные помечены `sensitive`, чтобы скрывать
+их значения в выводе Terraform. Вместо файла можно передать значения через переменные
+окружения `TF_VAR_folder_id`, `TF_VAR_subnet_id`, `TF_VAR_ssh_public_key`
+и `TF_VAR_ssh_user` из хранилища секретов.
 Ключ по-прежнему сохраняется в локальном state-файле: храните его защищённо.
 
-Из корня проекта:
+Из папки terraform проекта:
 
 ```powershell
-Set-Location terraform
 $env:YC_TOKEN = yc iam create-token
 terraform init
 terraform fmt -check
 terraform validate
-terraform plan -out=svalinn.tfplan
-terraform apply svalinn.tfplan
+terraform plan
+terraform apply
 ```
 
 Проверьте план перед `apply`: для новой установки он должен создавать одну ВМ.
